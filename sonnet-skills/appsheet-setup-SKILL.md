@@ -1,0 +1,880 @@
+---
+name: appsheet-setup
+version: 2.12
+description: >
+  Step-by-step guide for setting up AppSheet applications connected to Google Sheets.
+  Use this skill whenever a user wants to: create an AppSheet app from scratch, configure
+  table columns and types, set up virtual columns with formulas, configure views and
+  navigation, set up security filters and roles, brand the app, build a dashboard,
+  or troubleshoot AppSheet issues. Also use when a user asks about Ref columns, Enum types,
+  security filters, Format Rules, AppSheet expressions, Slices, or Dashboard views.
+  Also use when a user asks about App Documentation export, Enum audit, or managing
+  period/class Enum synchronisation across multiple tables.
+  Also use when a user asks about Enum-to-Ref refactoring, ref_periods/ref_classes
+  reference tables, Valid_If on Ref columns, or auto-generated Ref views/actions cleanup.
+  Also use when a user asks about Automation, Bots, Bot events, manual Bot triggers,
+  action sequences, Branch on condition, or Run a data action in Bots.
+  Also use when a user asks about Bot step type change, Bot step renaming, anti-cascade
+  Branch condition pattern, or KEY column visibility in detail views.
+  Especially useful for developers new to AppSheet who understand relational databases
+  but need AppSheet UI guidance.
+---
+
+# AppSheet Setup Guide v2.12
+
+This skill captures the end-to-end setup of a production AppSheet app connected to Google Sheets.
+
+## User Profile
+
+Target user: developer who understands relational databases, foreign keys, and enums — but is new to AppSheet. Skip DB theory, focus on WHERE things are in the AppSheet Editor UI.
+
+## Setup Order (Stages A–K)
+
+### A. Prepare Google Sheets
+
+1. In the `expenses` sheet, add a column `created_by` (lowercase, no spaces). Leave empty — AppSheet fills it automatically via `USEREMAIL()`.
+2. Create a new sheet `users` with columns `email` and `role`. Add ADMIN rows. OPERATOR rows can be added later when a real employee joins.
+
+### B. Create the App
+
+1. Go to appsheet.com → **+ Create** → **App** → **Start with existing data**
+2. Select **Google Sheets**, choose your file
+3. Name the app, choose category → **Choose your data**
+4. AppSheet will connect the first sheet automatically. After opening the editor, click **+** next to **Data** to add remaining sheets.
+5. In the sheet selector dialog: **uncheck** any sheets that should NOT be connected (e.g., `debts`, `dashboard` — computed elsewhere).
+6. Click **Add N tables**.
+
+### C. Configure Column Types
+
+Navigate to **Data** → click each table → adjust types.
+
+**Key rules:**
+- Foreign key columns → type **Ref**, set Source table
+- Phone fields → type **Phone**
+- Date-only fields → type **Date** (not DateTime)
+- Auto-generated IDs → keep as **Text**
+- `created_by` → App formula = `USEREMAIL()`; uncheck Show?
+- `created_at` → type **DateTime**, Initial value = `NOW()`; hide from forms
+
+**Enum columns:** For period fields (e.g., `202604`), change type to Enum and enter allowed values manually.
+
+**After saving**, AppSheet shows warnings about hidden columns being unsearchable — informational only.
+
+### D. Virtual Columns (Computed Fields)
+
+Virtual columns are calculated fields stored only in AppSheet, not in Sheets.
+
+**To add:** Data → table → click **+** button (top right of column list).
+
+**Debt calculation for student:**
+```
+SUM(SELECT(charges[amount], [student_id] = [_THISROW].[student_id]))
+- SUM(SELECT(payments[amount], [student_id] = [_THISROW].[student_id]))
+- SUM(SELECT(opening_balances[amount], [student_id] = [_THISROW].[student_id]))
+```
+
+**Family total debt:**
+```
+SUM(SELECT(students[debt], [family_id] = [_THISROW].[family_id]))
+```
+
+**Important:** Use `[_THISROW].[column]` to reference the current row in SELECT. Without it, the filter compares column to itself and returns all rows.
+
+**Testing:** Use the **Test** button in Expression Assistant. Note: virtual columns cannot reference other virtual columns from the same table in Test context — they return 0. Works correctly in live app.
+
+### E. Views
+
+Go to **Views** (phone icon in left panel).
+
+**To add views:** click **+** next to PRIMARY NAVIGATION → **Create a new view**.
+
+**Recommended view types:**
+- Lists of records → **deck**
+- Reference/lookup tables → **table**
+- Dashboard → **dashboard**
+
+**Key deck settings:**
+- **Primary header** → display name column
+- **Secondary header** → descriptive field
+- **Summary column** → numeric value
+
+**Sort:** Add sort in View Options. Use Descending for date/debt fields.
+
+**Show if:**
+```
+LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN"
+```
+
+**Dynamic card header (Detail view):**
+Add column to **Header columns** in View Options — it renders as large bold title at top of the card. Use `_ComputedName` virtual column for dynamic titles like `CONCATENATE([first_name], " ", [last_name], " (", [class_group], ")")`.
+
+### F. Forms
+
+AppSheet auto-generates forms. To customize:
+1. Find form in **SYSTEM GENERATED** section
+2. Switch **Column order** to **Manual**
+3. Hide: auto-generated IDs, `created_at`, virtual columns, `Related X` lists
+
+**Display names:** Data → table → column → pencil → Display section → **Display name**.
+
+**⚠️ Form Column order Manual:** When switching to Manual and adding columns, add ONLY columns from that table. AppSheet may inject columns from other tables (e.g., `settings`) into the list — these must not be included.
+
+**Form title / section header:** AppSheet does not have a dedicated form title field. Use a virtual column of type Show / Section_Header as the first column in the form. See Section L for details.
+
+**⚠️ KEY column cannot be hidden via Show?** on a writable table. To hide a KEY column from a form, use Column order Manual and simply do not add it to the list. Alternatively, set the table to Updates-only first.
+
+### G. Actions
+
+AppSheet auto-creates Delete and Edit actions. Skip custom actions for initial setup.
+
+**⚠️ Action "App: go to another view within this app"** — does NOT work reliably for ref-position views, neither in preview nor on mobile. Use direct navigation via PRIMARY NAVIGATION instead.
+
+**Action "App: open a form to add a new row"** — works correctly. Attach to the table that owns the form view (e.g., `expenses` for adding expenses). Position: Prominent shows as button, Inline shows in action bar.
+
+**LINKTOFORM for pre-filled forms:**
+```
+LINKTOFORM("FormViewName", "column1", [value1], "column2", [value2])
+```
+⚠️ All columns referenced in LINKTOFORM must have Show? = true. If a column is hidden (Show? = false), AppSheet throws an error and the action fails. KEY columns used in LINKTOFORM cannot be hidden.
+
+**Hiding Delete action:** UX → Actions → table → Delete → Position = `Hide`. Prevents accidental deletion without removing the action entirely.
+
+### H. Security
+
+**Step 1 — Add users:** Security → Require sign-in → **Manage users**.
+
+**Step 2 — Security Filters:**
+For ADMIN-only tables:
+```
+LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN"
+```
+
+For OPERATOR own-records:
+```
+OR(
+  LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN",
+  [created_by] = USEREMAIL()
+)
+```
+
+**Step 3 — View visibility:** Hide from OPERATOR using **Show if** in Display section.
+
+### I. Branding
+
+Settings (gear icon) → **Theme & Brand** → Primary color hex.
+
+### J. Testing Checklist
+
+1. Formula verification against known correct values
+2. ADMIN role: all views visible, full CRUD
+3. OPERATOR role: only allowed views, only own records
+4. Form usability: required fields, auto-generated IDs, dropdowns
+5. Debt recalculation after adding payment
+
+### K. Dashboard (Admin Summary View)
+
+#### K.1 Architecture: Settings Table Pattern
+
+AppSheet Dashboard view has a critical limitation: **no row limit on Deck views inside Dashboard**. For production apps with large datasets, inline Deck blocks show all records — unusable.
+
+**Recommended pattern:**
+1. Create a Google Sheet `settings` with one row: `id=1, label=dashboard`
+2. Connect to AppSheet as Updates-only table (enables filter field editing)
+3. Add virtual columns to `settings` — each computes one dashboard metric
+4. Create a Detail view on `settings`
+5. Add Detail view as entry in Dashboard view
+
+#### K.2 Table Settings Setup
+
+**In Google Sheets:** sheet `settings` with columns `id` (value: 1), `label` (value: dashboard). Add real filter columns as needed: `filter_category`, `filter_period`.
+
+**In AppSheet:**
+- Data → **+** → select `settings` → Add table
+- Table settings (gear ⚙️) → set **Updates only** (disables Adds/Deletes, allows editing filter fields)
+- To add new columns from Sheets: click 🔄 (regenerate) next to gear → **Regenerate**
+
+**⚠️ After Regenerate:** new columns may get wrong types (e.g., `filter_period` detected as Duration instead of Text). Always verify and fix types manually after regeneration.
+
+**⚠️ Date column auto-formula after Regenerate:** When a Date column (e.g., `academic_year_start`) is added to Sheets and then pulled via Regenerate Schema, AppSheet may auto-assign an App formula like `IF(MONTH(TODAY())...)`. This overwrites the Sheets value. After Regenerate, always open the column → Auto Compute → verify App formula is **empty**. Clear it if not.
+
+#### K.3 Key Virtual Column Formulas
+
+**Current period** (last period with regular charges):
+```
+INDEX(SORT(SELECT(charges[period], [tariff_id].[tariff_type] = "Регулярный"), TRUE), 1)
+```
+⚠️ `MAX()` does NOT work on Enum/Text columns. Use `INDEX(SORT(..., TRUE), 1)` instead.
+
+**Monthly receipts** (period is Enum/Text — use string comparison):
+```
+SUM(SELECT(payments[amount], [period] = [current_period]))
+```
+⚠️ Comparing Enum column to number literal causes type error. Always use string or reference another Enum/Text column.
+
+**Monthly expenses:**
+```
+SUM(SELECT(expenses[amount], [period] = [current_period]))
+```
+
+**Debtor count:**
+```
+COUNT(SELECT(families[family_id], [family_debt] > 0))
+```
+
+**Total debt of debtors:**
+```
+SUM(SELECT(families[family_debt], [family_debt] > 0))
+```
+
+**Academic year start** — store as a fixed Date value in Google Sheets `settings` table, column `academic_year_start`. Do NOT compute dynamically — the formula requires knowing whether the current school year has started, which may conflict with app logic.
+
+**Open period receipts** (payments in current_period month/year):
+```
+SUM(
+  SELECT(
+    payments[amount],
+    AND(
+      YEAR([payment_date]) = NUMBER(LEFT(ANY(settings[current_period]), 4)),
+      MONTH([payment_date]) = NUMBER(RIGHT(ANY(settings[current_period]), 2))
+    )
+  )
+)
+```
+
+**Open period expenses** (by period field):
+```
+SUM(SELECT(expenses[amount], NUMBER([period]) = NUMBER(ANY(settings[current_period]))))
+```
+
+**Closed periods receipts** (from academic_year_start up to but not including current_period):
+```
+SUM(
+  SELECT(
+    payments[amount],
+    AND(
+      [payment_date] >= ANY(settings[academic_year_start]),
+      OR(
+        YEAR([payment_date]) < NUMBER(LEFT(ANY(settings[current_period]), 4)),
+        AND(
+          YEAR([payment_date]) = NUMBER(LEFT(ANY(settings[current_period]), 4)),
+          MONTH([payment_date]) < NUMBER(RIGHT(ANY(settings[current_period]), 2))
+        )
+      )
+    )
+  )
+)
+```
+
+**Closed periods expenses** (by period field, >= academic year start, < current_period):
+```
+SUM(
+  SELECT(
+    expenses[amount],
+    AND(
+      NUMBER([period]) >= (YEAR(ANY(settings[academic_year_start])) * 100 + MONTH(ANY(settings[academic_year_start]))),
+      NUMBER([period]) < NUMBER(ANY(settings[current_period]))
+    )
+  )
+)
+```
+
+**Previous period** (YYYYMM, handles December→January boundary):
+```
+IFS(
+  NUMBER(RIGHT(ANY(settings[current_period]), 2)) > 1,
+  NUMBER(LEFT(ANY(settings[current_period]), 4)) * 100 + NUMBER(RIGHT(ANY(settings[current_period]), 2)) - 1,
+  TRUE,
+  (NUMBER(LEFT(ANY(settings[current_period]), 4)) - 1) * 100 + 12
+)
+```
+⚠️ Simple `NUMBER(current_period) - 1` breaks on January (202601 - 1 = 202600). Always use this IFS pattern.
+
+**YTD receipts:**
+```
+SUM(SELECT(payments[amount], [payment_date] >= [_THISROW].[academic_year_start]))
+```
+
+**YTD expenses:**
+```
+SUM(SELECT(expenses[amount], [expense_date] >= [_THISROW].[academic_year_start]))
+```
+
+**Free funds (YTD):**
+```
+[поступления_год] - [расходы_год]
+```
+
+#### K.4 Dashboard View Setup
+
+**Detail view on settings:**
+- View name: `дашборд_цифры`
+- For this data: `settings` (or a slice of settings)
+- View type: `detail`
+- Position: `ref`
+- **Display name formula (dynamic title — KEY PATTERN):**
+  ```
+  CONCATENATE("Текущий период: ", INDEX(settings[current_period], 1))
+  ```
+  ⚠️ View Display name has no row context — use `ANY(settings[column])` or `INDEX(settings[column], 1)`, NOT `[column]`.
+  
+  **This is the correct way to make dynamic block headers in Dashboard.** The Display name of a ref-position Detail view becomes the block header shown in Dashboard. Use a formula with `ANY()` or `INDEX()` to make it dynamic.
+
+- Hide service columns: `id`, `label`, `current_period`, `academic_year_start` → Show? = unchecked
+- Column order: Manual — drag to desired order
+- **Column Display names:** Data → settings → column → pencil → Display section → **Display name**. Set human-readable names here (not in the view). This affects all views that show the column.
+
+**Dashboard view:**
+- View type: `dashboard`
+- Position: `first`
+- Show if: `LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN"`
+- View entries: add detail views (size: Large)
+
+**⚠️ When Dashboard has multiple sub-views**, AppSheet shows a block header above each sub-view. This header is taken from the **Display name** of the sub-view (not its View name). Set Display name to a formula to make it dynamic and human-readable.
+
+**⚠️ When Dashboard has only one sub-view**, the block header is NOT shown — only the content of the sub-view is visible. This is why the old single-block dashboard looked clean.
+
+#### K.5 Multi-block Dashboard Pattern
+
+For dashboards with multiple thematic blocks (e.g., open period / debts / closed periods):
+
+1. Create one slice per block on `settings` — each slice contains only the columns for that block.
+2. Create one Detail view per slice (Position: ref). Set Display name = formula.
+3. Set Column order = Manual in each Detail view, add only the relevant columns (exclude `id`).
+4. Create Dashboard view, add all Detail views as View entries.
+
+**⚠️ KEY column (`id`) in slice:** cannot be excluded from Slice Columns. It will always appear. To hide it from the Detail view — use Column order Manual and do NOT add `id` to the list. It will not be shown even though it exists in the slice.
+
+**Naming convention for dashboard slices and views:**
+- Slices: `settings_dash_[block]` (e.g., `settings_dash_открытый`)
+- Detail views: `dash_[block]_detail` (e.g., `dash_открытый_detail`)
+
+#### K.6 Slices
+
+**⚠️ Where to CREATE a new Slice:**
+- Data → hover over table name → click **+** that appears → **New Slice**
+- This pre-sets the source table correctly.
+
+**⚠️ Where to FIND existing Slices:**
+- **Data** → expand a table → click the slice listed under it
+- Or via the view that uses it: Views → view → "For this data" dropdown
+
+**To delete a Slice:** Data → expand table → click slice → three dots "..." top right → Delete.
+
+**⚠️ Slice formula not saving bug:** If a Slice has an invalid formula, Expression Assistant may show green checkmark but not save the new formula. Solution: delete the Slice and recreate it from scratch.
+
+**⚠️ Slice deletes new VC on save:** If a Slice has a restricted Slice Columns list, it will delete any new Virtual Column that is not already in that list upon saving. Solution: create the VC first, then immediately add it to the Slice Columns list BEFORE saving. Do both in one session without saving in between.
+
+**Slice for debtors only:**
+- Slice name: `должники_slice`
+- Source table: `families`
+- Row filter: `[family_debt] > 0`
+- Update mode: `READ_ONLY` (removes "+" button from the view)
+
+**Slice for filtered expenses (by period and category, with ADMIN/OPERATOR role filter):**
+```
+AND(
+  OR(
+    ISBLANK(ANY(settings[filter_period])),
+    [period] = ANY(settings[filter_period])
+  ),
+  OR(
+    ISBLANK(ANY(settings[filter_category])),
+    TEXT([category]) = TEXT(ANY(settings[filter_category]))
+  ),
+  OR(
+    LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN",
+    [created_by] = USEREMAIL()
+  )
+)
+```
+⚠️ The third OR condition implements role-based filtering: ADMIN sees all, OPERATOR sees only their own records. This pattern applies to any slice where ownership filtering is needed.
+
+⚠️ When `category` is a Ref column and `filter_category` is also Ref, direct comparison `[category] = ANY(settings[filter_category])` may fail. Use `TEXT()` wrapper on both sides.
+
+⚠️ `ANY(settings[column])` reads from the single-row settings table. Works correctly only when settings has exactly one row.
+
+**Slice for recent payments (last N days):**
+```
+[payment_date] >= (TODAY() - 150)
+```
+
+**Slice for recent charges by period (last N days, YYYYMM Enum):**
+```
+NUMBER([period]) >= (YEAR(TODAY() - 150) * 100 + MONTH(TODAY() - 150))
+```
+See Section M for explanation of the NUMBER() pattern.
+
+#### K.7 Filter Panel Pattern (расходы с фильтром)
+
+Use a single-row `settings` table as the filter state store:
+1. Add filter columns to `settings` sheet: `filter_period`, `filter_category`, etc.
+2. In AppSheet, set their type to match the filtered column (Enum or Ref).
+3. Slice row filter uses `OR(ISBLANK(ANY(settings[filter])), [col] = ANY(settings[filter]))`.
+4. Create a Detail view on `settings` (Position: ref) as the filter panel UI.
+5. Show the filter panel via a navigation action or menu entry.
+
+---
+
+## Section P — Enum-to-Ref Refactoring
+
+This section documents the full procedure for converting Enum columns to Ref columns backed by reference tables (`ref_periods`, `ref_classes`, etc.).
+
+### P.1 Why Refactor
+
+- **Single source of truth:** add a new period/class once in the sheet, all tables see it
+- **No synchronisation errors:** eliminates the recurring problem of Enum values being out of sync across tables
+- **Scalable:** `ref_periods` can grow to cover any date range without touching AppSheet config
+
+### P.2 Reference Table Setup in Google Sheets
+
+**`ref_periods` sheet:**
+- Column A header: `period`
+- Values: YYYYMM as Text (e.g., `202601`, `202602`, ..., `203612`)
+- Recommended range: current year - 1 to current year + 5 (72–120 rows)
+
+**Fast fill method (formula helper):**
+1. In B1 enter a start date: `2026-01-01`
+2. In B2: `=B1+32` — extend to B121 (each row guaranteed to be a different month)
+3. In A2: `=YEAR(B2)*100+MONTH(B2)` — extend to A121
+4. Select A2:A121 → Copy → Paste special → Values only
+5. Delete column B
+
+⚠️ The +32 trick works because adding 32 days to any date always lands in the next month. Sheets handles date math correctly across month/year boundaries.
+
+**`ref_classes` sheet:**
+- Column A header: `class_group`
+- Values: `0 класс`, `1 класс`, ..., `11 класс` (12 rows)
+- Values must match exactly what is stored in the `students` table — including spaces and case
+
+### P.3 Adding Reference Tables to AppSheet
+
+1. Data → **+** → Google Sheets → select same file → select `ref_periods` sheet
+2. Verify: `period` column → type **Text**, KEY? = ✅
+3. Repeat for `ref_classes`: `class_group` → type **Text**, KEY? = ✅
+4. Save
+
+**⚠️ Type must be Text, not Number.** If AppSheet detects the column as Number, the period values will display with thousands separator (e.g., `202 603` instead of `202603`). Change type to Text.
+
+**⚠️ AppSheet auto-generates views for new reference tables** (`ref_periods_Detail`, `ref_periods_Form`, `ref_classes_Detail`, `ref_classes_Form`). These are not needed if users manage the reference data directly in Google Sheets. Delete all auto-generated views for reference tables:
+UX → Views → SYSTEM GENERATED → ref_periods (2) → delete both → repeat for ref_classes.
+
+**⚠️ AppSheet auto-generates `View Ref (period)` actions** for every table that has a Ref column pointing to `ref_periods`. These actions open the reference table card — not useful for end users. Hide or delete them:
+Behavior → Actions → expand each table → find `View Ref (period)` / `View Ref (class_group)` → Position = Hide (or Delete if allowed).
+
+### P.4 Converting Enum Columns to Ref
+
+For each column being converted (e.g., `charges[period]`, `expenses[period]`, `students[class_group]`, `settings[filter_charges_period]`, etc.):
+
+1. Data → table → column → pencil ✏️
+2. Type → change to **Ref**
+3. Source table → select `ref_periods` (or `ref_classes`)
+4. Is a part of? → **false** (reference tables are not owned by the parent record)
+5. Done → Save
+
+**Order matters:** Convert columns one at a time. Save and verify the app loads after each conversion for the first few — AppSheet handles Ref cascades gracefully but it's safer to proceed incrementally.
+
+**⚠️ Before deleting any column** (e.g., a redundant computed column like `period_num`): audit App Documentation for all references. Download HTML documentation via:
+`https://www.appsheet.com/template/AppDoc?appId=YOUR_APP_ID`
+Then search for the column name. Check: Slice Columns lists, Virtual Column formulas, View Column orders, Action formulas. Remove from all locations before deleting from Sheets.
+
+### P.5 Valid_If on Ref Columns (Dropdown Filtering)
+
+**Common misconception:** Valid_If on a Ref column validates after selection. **This is wrong.**
+
+Valid_If on a Ref column **filters the dropdown** if the expression returns a **list of key values** from the referenced table. If Valid_If returns Yes/No, it only validates — it does NOT filter the dropdown.
+
+**Correct pattern — return a filtered list of keys:**
+```
+SELECT(
+  ref_periods[period],
+  AND(
+    NUMBER([period]) >= NUMBER(ANY(settings[current_period])) - 3,
+    NUMBER([period]) <= NUMBER(ANY(settings[current_period])) + 3
+  )
+)
+```
+
+**Wrong pattern — returns Yes/No, does NOT filter dropdown:**
+```
+AND(
+  [_THIS] >= ANY(settings[current_period]) - 3,
+  [_THIS] <= ANY(settings[current_period]) + 3
+)
+```
+
+**⚠️ Arithmetic on Text keys requires NUMBER() wrapper.** After converting period from Enum to Text Ref, `ANY(settings[current_period])` returns Text. Arithmetic on Text causes `inputs of an invalid type 'Unknown'` error. Wrap both sides in `NUMBER()`.
+
+**⚠️ VALUE() and TEXT() are not AppSheet functions for type conversion.** Use `NUMBER()` to convert Text to numeric. `VALUE()` does not exist in AppSheet expressions.
+
+**For class dropdown (show all classes, no filter):**
+```
+SELECT(ref_classes[class_group], TRUE)
+```
+
+**Business anchor for period window:** Use `current_period` from `settings` (last period with regular charges), NOT `TODAY()`. This ensures the dropdown window follows business activity, not the calendar. If charges are entered for April but the calendar shows August, the window should be around April.
+
+**Window size:** ±3 months covers most retroactive entry scenarios for a school. On year boundaries, the SELECT formula naturally clips to available values in `ref_periods` — no special handling needed.
+
+### P.6 Initial Value on Ref Period Columns
+
+After setting Valid_If, add Initial value so the period auto-fills in forms:
+```
+ANY(settings[current_period])
+```
+
+Apply to: `charges[period]`, `expenses[period]` (and any other entry forms where period should default to current).
+
+### P.7 Phantom Column Cleanup After Refactor
+
+After an Enum-to-Ref refactor, scan for phantom references to the old column name:
+
+**In Views (Column order):**
+- Forms: find old column name in Manual column order → remove
+- Deck/Table views: check Secondary header, Summary column for old column
+
+**In Actions:**
+- Auto-generated `View Ref (X)` actions for new Ref columns → Hide/Delete
+
+**Procedure:**
+1. Download App Documentation HTML
+2. `grep -n "old_column_name" documentation.html` (or Ctrl+F in browser)
+3. For each hit: remove from Slice Columns, View Column orders, Action formulas
+4. Then delete from Google Sheets + Regenerate in AppSheet
+
+---
+
+## Troubleshooting
+
+**New column from Sheets gets wrong type after Regenerate**
+Always verify column types manually after Regenerate. Common: period/text fields detected as Duration or Price.
+
+**Date column gets auto-formula after Regenerate**
+AppSheet may assign `IF(MONTH(TODAY())...)` to a Date column pulled from Sheets. After Regenerate, open the column → Auto Compute → clear App formula if present.
+
+**Action "navigate to view" returns Network error**
+Known AppSheet limitation — navigation Actions to ref-position views don't work. Use menu navigation instead.
+
+**Detail view on settings shows all columns (including dashboard virtuals)**
+Switch Column order to Manual and add only needed columns via + Add. Never use Automatic on settings detail views used as filter panels.
+
+**Form Column order Manual injects foreign columns**
+When switching form to Manual column order, AppSheet may show columns from other tables. Add only the columns belonging to that form's table.
+
+**Section header not appearing in form**
+1. Check column is added to form's Column order (Manual → + Add).
+2. Check Show? = true (no conditions).
+3. KEY column with UNIQUEID() Initial value is never blank — do not use ISBLANK([key]) as Show? condition.
+
+**Deck view renders as table instead of deck**
+Three possible causes (check all):
+1. Primary header / Secondary header / Summary column are empty → fill them explicitly.
+2. No Label column on source table → set Label = ✅ on one column (recommended: VC `_ComputedKey`).
+3. `Related X` column points to the full table, not a slice → change Referenced table name to the slice.
+
+**Related X shows technical table in Detail card instead of deck**
+Change Referenced table name on the `Related X` column from the full table to a slice:
+Data → parent table → `Related X` → Type Details → Referenced table name → select `slice_name (slice)`.
+A slice is required even if it has no row filter — AppSheet uses the slice's presence to trigger deck rendering.
+
+**Slice deletes new VC on save**
+Slice has restricted Slice Columns list. Create VC → immediately add to Slice Columns → then Save. Never save between creating VC and adding it to slice.
+
+**Format Rules not found**
+Format Rules are NOT under the gear ⚙️ next to "Views". Correct path:
+UX (phone icon) → second column submenu → **Format Rules**.
+
+**Dashboard block header shows technical view name**
+The block header in a multi-entry Dashboard is taken from the **Display name** of the sub-view. Set Display name to a formula in the view's Display section (Go to display options → Display name). Use `ANY(settings[column])` since there is no row context.
+
+**Previous period formula gives 202600 for January**
+Simple `NUMBER(current_period) - 1` breaks on year boundary. Use the IFS pattern (see Section M, Pattern 5).
+
+**OPERATOR sees all records instead of only their own**
+Add role-based OR condition to slice Row filter:
+```
+OR(
+  LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN",
+  [created_by] = USEREMAIL()
+)
+```
+If still not working — check email case sensitivity. Wrap in `LOWER()`:
+```
+OR(
+  LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN",
+  LOWER([created_by]) = LOWER(USEREMAIL())
+)
+```
+
+**Колонка есть в форме, но отсутствует в Documentation**
+Если колонка видна в Column order формы (Manual), но не отображается в HTML Documentation — она скрыта (`Show? = false`). Documentation не экспортирует скрытые колонки. Для полного списка колонок таблицы всегда проверяй редактор, а не только Documentation.
+
+**App Documentation не найден в Manage**
+В текущей версии редактора AppSheet раздел Documentation/Author отсутствует в меню Manage (видны только Deploy / Versions / Monitor / Collaborate & Publish). Использовать прямую ссылку: `https://www.appsheet.com/template/AppDoc?appId=YOUR_APP_ID`. App ID берётся из адресной строки редактора. Подробнее — Section N.
+
+**Enum рассинхронизирован в одном из мест, фильтр не работает**
+Одна из причин — опечатка в EnumValues (например, `"11класс"` вместо `"11 класс"`). Проверить все Enum-определения по карте Section O.2. Вторая причина — новый период/класс добавлен не во все колонки (см. чеклисты O.5 и O.6).
+
+**Ref-колонка не появляется в списке добавления колонок формы**
+Если Ref-колонка не отображается в списке Column order (Manual → + Add) формы — причина в Show? = false на этой колонке. Открой Data → таблица → колонка → Show? = true. После этого колонка появится в списке формы.
+
+**VC типа Show не вычисляется в форме для новой строки**
+VC типа Show с формулой на основе Ref (например, CONCATENATE([ref_id].[field], ...)) не отображает значение в форме добавления новой записи — контекст строки ещё не существует. Решение: поменяй тип VC на Text. Тип Text с App formula вычисляется в форме корректно и показывает значение из Ref-колонки контекста.
+
+**Referenced table name принимает только таблицы и слайсы, не views**
+При настройке Related X колонки (Type Details → Referenced table name) в списке отображаются только таблицы и слайсы. Отдельный ref-position view в этом списке не появится. Для кастомного отображения Related-блока создай slice на нужной таблице и укажи его в Referenced table name.
+
+**Конфликт лишнего Table view и inline Deck — Related-блок отображается как таблица**
+Симптом: в карточке родительской записи Related-блок внезапно показывается как таблица с неправильными колонками вместо настроенного deck.
+Причина: если для дочерней таблицы существует ref-position Table view, AppSheet может использовать его для рендеринга Related-блока вместо настроенного Deck/Inline view — даже если Referenced table name указывает на полную таблицу, а не на slice.
+Решение: удали лишний Table view (ref-position) на дочерней таблице. Если view нужен для другого контекста (например, карточки другой сущности) — замени его на slice + отдельный view, и укажи Referenced table name явно на нужный slice в каждом родительском контексте.
+Проверка: после удаления лишнего view перезапусти приложение и убедись что deck отображается корректно.
+
+**Number-тип колонки ключа ref-таблицы отображается с разделителем тысяч**
+Симптом: период `202603` отображается как `202 603` в приложении.
+Причина: AppSheet автоматически определил тип колонки как Number, который форматируется с разделителями тысяч.
+Решение: Data → ref_periods → period → Type → поменять с Number на **Text**. После сохранения значения отображаются без форматирования.
+
+**Valid_If на Ref-колонке не фильтрует dropdown, показывает все значения**
+Симптом: формула Valid_If сохранена, но дропдаун всё равно показывает весь справочник.
+Причина: Valid_If возвращает Yes/No вместо списка ключей.
+Решение: переписать Valid_If так, чтобы он возвращал `SELECT(ref_table[key_column], condition)` — список ключей. Только тогда AppSheet фильтрует dropdown.
+
+Пример неправильной формулы (Yes/No — не фильтрует):
+```
+AND([_THIS] >= X, [_THIS] <= Y)
+```
+Пример правильной формулы (List — фильтрует dropdown):
+```
+SELECT(ref_periods[period], AND(NUMBER([period]) >= X, NUMBER([period]) <= Y))
+```
+
+**Branch on a condition — правая панель не открывается**
+Симптом: клик на блок Branch в Bot не открывает настройки в правой панели — панель показывает «Automation settings».
+Решение: условие вводится через серое поле прямо внутри блока Branch. Клик на это поле открывает Expression Assistant.
+
+**Confirmation Message — синтаксис `<<column>>` не работает**
+Симптом: при вводе `<<ANY(settings[col])>>` в поле Confirmation Message — ошибка `Unexpected content: "<"`.
+Причина: поле Confirmation Message принимает AppSheet-выражения (Expression Assistant), но не шаблонный синтаксис `<<...>>`.
+Решение: использовать `CONCATENATE()`:
+```
+CONCATENATE("Текст ", ANY(settings[current_period]), " продолжение")
+```
+
+**Grouped Action не видит actions других таблиц**
+Симптом: в дропдауне Actions у `Grouped: execute a sequence of actions` отображаются только actions той же таблицы.
+Причина: Grouped Action ограничен actions своей таблицы.
+Решение: использовать `Data: execute an action on a set of rows` — этот тип может вызывать actions любой таблицы через Referenced Table + Referenced Rows + Referenced Action.
+
+**KEY-колонка не скрывается в detail view на writable-таблице**
+Симптом: `id` (или другая KEY-колонка) продолжает отображаться в detail view несмотря на `Show? = false`, Column order Manual без `id` в списке, или любые другие попытки скрыть.
+Причина: AppSheet не позволяет скрыть KEY-колонку на writable-таблице стандартными методами.
+Решение: принять как ограничение AppSheet. Единственный полный обходной путь — перевести таблицу в Read-Only (Update mode), но это отключает редактирование через все формы. Если таблица должна оставаться редактируемой — KEY в view убрать нельзя.
+
+**Branch condition вызывает каскадирование — каждый клик создаёт новый месяц charges**
+Симптом: защита от повторного закрытия периода не срабатывает. Каждый клик кнопки создаёт charges ещё на один месяц вперёд.
+Причина: Branch проверяет «следующий период после `current_period`». Но `current_period` — VC, пересчитывается синхронно после ForEach. На второй клик «следующий период» всегда пуст, Branch уходит в NO-ветку.
+Решение: использовать календарно-привязанное условие (см. Q.10):
+```
+AND(
+  NUMBER(ANY(settings[current_period])) > (YEAR(TODAY()) * 100) + MONTH(TODAY()),
+  ISNOTBLANK(SELECT(charges[charge_id], AND(
+    [period] = ANY(settings[current_period]),
+    [charge_type] = "Авто"
+  )))
+)
+```
+
+**Новая физическая колонка в Sheets не появляется в AppSheet**
+После добавления заголовка в Google Sheets колонка не появляется в Data редактора автоматически.
+Решение: Data → таблица → ⚙️ → **Regenerate Schema**. После Regenerate проверить тип колонки — AppSheet часто определяет его неверно (например, `Name` вместо `DateTime`).
+
+---
+
+## Section Q — Automation: Bots and Action Sequences
+
+### Q.1 Bot Event Types
+
+AppSheet Bots support three event source types:
+- **App (Data change):** triggers on Adds, Deletes, or Updates to a specific table
+- **Scheduled:** triggers on a time schedule (hourly, daily, weekly, etc.)
+- **Manual trigger:** does NOT exist as a separate event type in AppSheet
+
+To trigger a Bot from a button click, use the **service column pattern** (see Q.2).
+
+### Q.2 Manual Bot Trigger Pattern (Button → Bot)
+
+AppSheet has no "run Bot on button press" event. The idiomatic workaround:
+
+1. Add a **physical DateTime column** (e.g., `last_trigger`) to a single-row service table (e.g., `settings`). Set Show? = false.
+2. Create a **technical Action** on `settings` (type: `Data: set the values of some columns in this row`): sets `last_trigger = NOW()`. Set Show? condition = `FALSE`.
+3. Create the **user-facing Action** on the working table (type: `Data: execute an action on a set of rows`): Referenced Table = `settings`, Referenced Rows = `SELECT(settings[id], TRUE)`, Referenced Action = the technical action above. Configure Display name, Show_If, Needs confirmation here.
+4. Create a **Bot** with Event: Table = `settings`, Updates only, Condition = `[_THISROW_BEFORE].[last_trigger] <> [_THISROW_AFTER].[last_trigger]`.
+
+This ensures the Bot fires exactly once per button press, regardless of other updates to `settings`.
+
+**⚠️ The trigger column must be physical (in Google Sheets), not a Virtual Column.** AppSheet cannot write to VCs via Action, so the Bot would never fire.
+
+**⚠️ Adding a new physical column to a connected Sheet:** add the header in Google Sheets first (text only, no formula, no data), then in AppSheet: Data → table → ⚙️ → Regenerate Schema. After Regenerate, set the correct type manually — AppSheet often guesses wrong (e.g., `Name` instead of `DateTime`).
+
+### Q.3 Bot Event Condition: Before/After Column Values
+
+To detect that a specific column changed (and not just any update to the table), use the `_THISROW_BEFORE` / `_THISROW_AFTER` pattern in the Bot Event Condition field:
+
+```
+[_THISROW_BEFORE].[column_name] <> [_THISROW_AFTER].[column_name]
+```
+
+These are native AppSheet expressions available only in Bot Event Condition context. Source: Google AppSheet documentation — "Access column values before and after an update" (support.google.com/appsheet/answer/11547057).
+
+### Q.4 Bot Process Steps
+
+Steps are added via **+ Add a step** inside the Process section of a Bot. Each step has a type:
+
+- **Run a task** — sends email, notification, SMS, webhook, creates file, calls script
+- **Run a data action** — executes an AppSheet Action on a set of rows
+- **Branch on a condition** — conditional YES/NO fork
+- **Wait** — pauses for a time condition
+- **Call a process** — calls a reusable sub-process
+- **Return values** — returns values from a sub-process
+
+**Send a notification** is selected within "Run a task" by clicking the bell icon in the right Settings panel. Turn off "Use default content?" to write a custom Title and Body using expressions in the Title and Body fields (Λ icon).
+
+### Q.5 Branch on a Condition — UI Notes
+
+The Branch step has a counterintuitive UI:
+- Clicking the Branch block does NOT open settings in the right panel — the panel shows "Automation settings" instead.
+- The condition is entered by clicking the **grey field directly inside the Branch block** — this opens Expression Assistant.
+- YES branch = condition is TRUE; NO branch = condition is FALSE.
+- Sub-steps are added via the **➕ button under each branch arm**.
+
+### Q.6 Confirmation Message in Actions — Syntax
+
+The Confirmation Message field in Action Behavior accepts AppSheet expressions (opened via Expression Assistant, Λ icon). The template syntax `<<column>>` does NOT work here — it throws `Unexpected content: "<"`.
+
+Use `CONCATENATE()` instead:
+
+```
+CONCATENATE("Are you sure? Current period: ", ANY(settings[current_period]), ". Next period: ", INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(ANY(settings[current_period])))), 1), ".")
+```
+
+### Q.7 `Data: execute an action on a set of rows` — Cross-Table Scope
+
+`Grouped: execute a sequence of actions` only shows actions from the **same table** in its action list. It cannot call actions on other tables.
+
+To execute an action on rows of a different table, use `Data: execute an action on a set of rows`:
+- **Referenced Table:** the target table
+- **Referenced Rows:** a SELECT expression returning keys from that table
+- **Referenced Action:** the action to run on each row
+
+This type can be called from any table and references any other table in the app.
+
+### Q.8 Bot Step: Renaming
+
+To rename a Bot step — click **⋮** (three dots) on the step block in the canvas → **Rename** → enter new name → confirm.
+
+The rename option is on the block itself, not in the right Settings panel.
+
+**⚠️** Default step names (`New step`, `New step 1`, `New step 2 2`, etc.) are not sequential — AppSheet assigns them based on creation order. Always rename steps immediately after creation for readable Bot structure.
+
+### Q.9 Bot Step: Changing Step Type
+
+To change a step's type (e.g., from `Run a task` to `Run a data action`):
+
+1. Click **⋮** on the step block → **Change type** (or "Change step type").
+2. Select the new step type from the list.
+
+**⚠️** The **`Run a task ▼`** dropdown button inside the step block changes the *task subtype* (email / notification / webhook / etc.) — it does NOT change the step type. Changing step type requires ⋮ → Change type on the block.
+
+**`Run a data action` → `Set row values`** pattern (write to settings after Bot action):
+1. Change step type to `Run a data action`.
+2. In the right Settings panel, select **Set row values**.
+3. In **Set these column(s)**: add columns and set values via Expression Assistant (Λ icon).
+
+This is the correct way to write `last_close_at = NOW()` or `last_close_message = CONCATENATE(...)` to a settings table from a Bot step.
+
+### Q.10 Anti-Cascade Branch Condition Pattern
+
+**Problem:** A Branch condition that checks for charges in "the next period after `current_period`" fails in a live flow because `current_period` is a Virtual Column — it recalculates immediately after the ForEach creates new charges. By the time the Branch is evaluated on a second click, `current_period` has already advanced, so "next period" is always empty, and the YES-branch (already closed) never fires. Result: each button press creates another month of charges (cascade).
+
+**Solution:** Use a calendar-anchored condition instead:
+
+```
+AND(
+  NUMBER(ANY(settings[current_period])) > (YEAR(TODAY()) * 100) + MONTH(TODAY()),
+  ISNOTBLANK(SELECT(charges[charge_id], AND(
+    [period] = ANY(settings[current_period]),
+    [charge_type] = "Авто"
+  )))
+)
+```
+
+**Logic:**
+- Condition 1: `current_period` has already moved past the calendar month → closure already happened.
+- Condition 2: charges for that `current_period` actually exist (guard against manual data anomalies).
+
+**Branch = YES** → period already closed, ForEach must not fire.  
+**Branch = NO** → calendar month not yet closed, proceed with ForEach.
+
+**Terminology note:** After a successful closure, `current_period` shifts to the newly created period (it is a VC counting max period in charges). When Branch=YES fires on a repeated click, `current_period` already contains the "new current" period — the one whose charges were just created. The YES-branch message should reference `ANY(settings[current_period])` directly (not "next period").
+
+---
+
+## AppSheet Expression Reference
+
+| Need | Expression |
+|------|-----------|
+| Current user's email | `USEREMAIL()` |
+| Current user's role | `LOOKUP(USEREMAIL(), "users", "email", "role")` |
+| Sum related records | `SUM(SELECT(table[column], [fk] = [_THISROW].[pk]))` |
+| Auto-generate ID | `UNIQUEID()` |
+| Today's date | `TODAY()` |
+| Current datetime | `NOW()` |
+| Max of text/enum list | `INDEX(SORT(SELECT(table[col], condition), TRUE), 1)` |
+| Current YYYYMM string | `CONCATENATE(YEAR(TODAY()), IF(MONTH(TODAY()) < 10, "0", ""), MONTH(TODAY()))` |
+| YYYYMM N days ago | `CONCATENATE(YEAR(TODAY()-N), IF(MONTH(TODAY()-N) < 10, "0", ""), MONTH(TODAY()-N))` |
+| YYYYMM as number | `NUMBER([period])` |
+| Period >= N days ago | `NUMBER([period]) >= (YEAR(TODAY()-N)*100 + MONTH(TODAY()-N))` |
+| Academic year start | Store as fixed Date value in settings sheet — do not compute dynamically |
+| Read single-row table | `ANY(settings[column])` or `INDEX(settings[column], 1)` |
+| Check role | `LOOKUP(USEREMAIL(), "users", "email", "role") = "ADMIN"` |
+| Filter: blank = all | `OR(ISBLANK(ANY(settings[filter])), [column] = ANY(settings[filter]))` |
+| Clip value to zero | `IFS(value > 0, value, TRUE, 0)` — MAX(0, value) not supported |
+| Compare Ref to Ref | `TEXT([ref_column]) = TEXT(ANY(settings[ref_filter]))` |
+| Pre-fill form | `LINKTOFORM("FormName", "col1", [val1], "col2", [val2])` |
+| Label for deck (VC) | `CONCATENATE([fk], ": ", [display_field])` — type Text, Label = ✅ |
+| Previous YYYYMM period | `IFS(NUMBER(RIGHT(ANY(settings[current_period]),2))>1, NUMBER(LEFT(ANY(settings[current_period]),4))*100+NUMBER(RIGHT(ANY(settings[current_period]),2))-1, TRUE, (NUMBER(LEFT(ANY(settings[current_period]),4))-1)*100+12)` |
+| Dynamic view block header | Set Display name in view's Display section to formula using `ANY(settings[col])` |
+| Display name of Related block | Data → parent table → Related X → pencil → Display → Display name |
+| Show ref field value in form | Use VC type Text (not Show) with App formula `[ref_id].[field]` — Show type does not compute for new rows |
+| Filter Ref dropdown by condition | `SELECT(ref_table[key_col], condition_on_ref_rows)` — use in Valid_If |
+| Convert Text key to number for arithmetic | `NUMBER([text_ref_key])` — required after Enum→Ref conversion |
+| Initial value = current period | `ANY(settings[current_period])` |
+| Detect column changed in Bot event | `[_THISROW_BEFORE].[col] <> [_THISROW_AFTER].[col]` — Bot Event Condition only |
+| Next period from ref_periods | `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(ANY(settings[current_period])))), 1)` |
+| Dynamic confirmation message | `CONCATENATE("Text ", ANY(settings[col]), " more text")` — use instead of `<<col>>` syntax |
+
+---
+
+## Architecture Notes
+
+- Sheets that are purely computed (dashboard, debts) should NOT be connected to AppSheet
+- `settings` table: single-row service table for app-wide parameters (current period, filter values, academic year start)
+- Period format: YYYYMM as Text (e.g., "202604" = April 2026) — **Text, not Number**, to avoid thousands-separator display issues
+- Reference tables (e.g., `expense_categories`, `ref_periods`, `ref_classes`) should be Ref columns, not Enum — enables future extensibility and single-source-of-truth maintenance
+- AppSheet auto-creates `Related X` virtual columns (List type) when Ref + "Is a part of?" is configured
+- Filter by period (YYYYMM Text) is simpler and more reliable than filter by date range for school billing use case
+- Two-entry-point navigation: PRIMARY for quick add, MENU for filtered analytics
+- Inline related records: use Slices + ref-position Deck views; point `Related X` Referenced table name to the slice
+- Deck requires: (1) Label column on source table, (2) Primary/Secondary/Summary filled, (3) Referenced table name pointing to slice
+- Dashboard multi-block: one slice + one Detail view per block; Display name of view = dynamic formula via `ANY()`
+- Role-based filtering: add `OR(LOOKUP(...) = "ADMIN", [created_by] = USEREMAIL())` to slice Row filter — not to Security filter, to preserve ADMIN access
+- Referenced table name accepts only tables and slices — not views. Always use a slice as intermediary for custom Related block rendering.
+- A loner ref-position Table view on a child table can override deck rendering in parent cards even when Referenced table name points to the full table. Keep ref-position views minimal and intentional.
+- After Enum→Ref refactor: delete auto-generated Detail/Form views for reference tables; hide/delete auto-generated `View Ref (col)` actions — they are not useful for end users.
+- Manual Bot triggers require a physical service column (DateTime, hidden) in a single-row table. Writing `NOW()` to it via Action fires the Bot. Virtual columns cannot be used as triggers — Actions cannot write to VCs.
+- `Grouped: execute a sequence of actions` is limited to actions on the same table. Use `Data: execute an action on a set of rows` to call actions across tables.
+- Confirmation Message field uses Expression Assistant (Λ icon) and accepts AppSheet expressions. Template syntax `<<col>>` is not supported — use `CONCATENATE()` instead.
+- **KEY column in a detail view on a writable table cannot be hidden** via `Show? = false`, Column order Manual (empty list), or any other standard method. This is an AppSheet limitation. If the KEY column appearing in the view is unacceptable, the only workaround is to make the table Read-Only (but this disables all editing).
+- **Bot step renaming:** ⋮ on the step block → Rename. Not in the right panel.
+- **Bot step type change:** ⋮ on the step block → Change type. The `Run a task ▼` dropdown inside the block changes task subtype only.
+- **Anti-cascade Branch:** never check "next period" in a Bot that shifts `current_period` via ForEach — use calendar-anchored condition instead (see Q.10).
