@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — СО Клевер Биллинг
 
-**Версия:** 0.1 (08.05.2026)
+**Версия:** 0.2 (09.05.2026)
 **Назначение документа:** долгоживущая память о технической реализации. Реальные составы таблиц, дословные формулы, цепочки actions и bots, накопленные best practices, карта подводных камней AppSheet.
 
 **Что НЕ в этом документе:** бизнес-модель и принципы (`SYSTEM.md`), метафоры и термины (`GLOSSARY.md`), регламенты работы (`REGULATIONS.md`).
@@ -25,7 +25,7 @@
 
 ### §1.2. Приложение
 
-**AppSheet:** `soklever-root-billing v.1.0`. Версия на 08.05.2026 — **1.000440** (после применения pre-#08 и мини-патча §7.1 v10).
+**AppSheet:** `soklever-root-billing v.1.0`. Версия на 09.05.2026 — **1.000483** (после применения pre-#08 и pre-#08.1).
 
 ### §1.3. Логика
 
@@ -37,7 +37,7 @@
 
 Все составы — буквально как в Data view AppSheet на 06.05.2026 (v10) с уточнениями на 08.05.
 
-### §2.1. `students` (19 колонок)
+### §2.1. `students` (21 колонка)
 
 | # | Колонка | Тип | Заметка |
 |---|---|---|---|
@@ -46,22 +46,28 @@
 | 3 | `family_id` | Ref | → families |
 | 4 | `first_name` | Name | |
 | 5 | `last_name` | Name | |
-| 6 | `class_group` | Ref | → ref_classes (после #6) |
-| 7 | `status` | Enum | значения: «Активен», «Выбыл». Allow other = false. |
+| 6 | `class_group` | Ref | → ref_classes (после #6). Очищается при выбытии (pre-#08.1) |
+| 7 | `status` | Enum | значения: «Активен», «Выбыл». Allow other = false. Initial Value = «Активен» (pre-#08) |
 | 8 | `start_date` | Date | используется (pre-#08 — добавлено в форму создания) |
-| 9 | `end_date` | Date | заполняется action «Выбытие» (pre-#08.1) |
-| 10 | `comment` | Text | |
-| 11 | `created_at` | DateTime | |
-| 12 | `_ComputedName` | Name (VC, LABEL) | формула в §3.5 |
-| 13 | `Related opening_balance` | List (VC) | `REF_ROWS("opening_balances", ...)` |
-| 14 | `Related payments` | List (VC) | `REF_ROWS("payments", ...)` |
-| 15 | `Related student_tariffs` | List (VC) | `REF_ROWS("student_tariffs", ...)` |
-| 16 | `debt` | Number (VC) | формула в §3.3 |
-| 17 | `Related charges` | List (VC) | `REF_ROWS("charges", ...)` |
-| 18 | `overdue_debt` | Number (VC) | формула в §3.4 |
-| 19 | `_form_header_students` | Show | косметика формы |
+| 9 | `end_date` | Date | заполняется action «Выбытие» = `[withdrawal_date]` (pre-#08.1) |
+| 10 | `withdrawal_date` | Date | **NEW в pre-#08.1.** Служебная: хранит дату выбытия из формы до применения транзакции. `Show? = false`, Display name «дата выбытия» |
+| 11 | `birth_date` | Date | **NEW в pre-#08.1.** Дата рождения. `Require? = false`, Display name «дата рождения» |
+| 12 | `comment` | Text | |
+| 13 | `created_at` | DateTime | Display name «создан» (унифицировано в pre-#08.1) |
+| 14 | `_ComputedName` | Name (VC, LABEL) | формула в §3.5. Header column в `students_Detail` — отображается всегда (см. §6.8) |
+| 15 | `Related opening_balance` | List (VC) | `REF_ROWS("opening_balances", ...)` |
+| 16 | `Related payments` | List (VC) | `REF_ROWS("payments", ...)` |
+| 17 | `Related student_tariffs` | List (VC) | `REF_ROWS("student_tariffs", ...)`. Очищаются при выбытии (pre-#08.1) |
+| 18 | `debt` | Number (VC) | формула в §3.3 |
+| 19 | `Related charges` | List (VC) | `REF_ROWS("charges", ...)` |
+| 20 | `overdue_debt` | Number (VC) | формула в §3.4 |
+| 21 | `_form_header_students` | Show | косметика формы |
 
-**Изменения относительно v10:** в v9/v10 `start_date`/`end_date` числились рудиментами. В pre-#08/pre-#08.1 они активированы (форма «Новый ученик» + кнопка «Выбытие»). К удалению **не идут**.
+**Изменения относительно v10:** в v9/v10 `start_date`/`end_date` числились рудиментами. В pre-#08/pre-#08.1 они активированы (форма «Новый ученик» + кнопка «Выбытие»). К удалению **не идут**. Добавлены `withdrawal_date` (служебная) и `birth_date` (доменная).
+
+**Slices на `students`:**
+- `students_visible` (pre-#08.1) — Source: students, Row filter: `OR([status]="Активен", [debt]<>0)`, all columns, Updates+Adds+Deletes. Используется в основном view списка учеников.
+- `students_withdrawal` (pre-#08.1) — Source: students, Columns: `student_id` (Key) + `withdrawal_date`, Update mode: Updates only. Используется только в `students_withdrawal_form`.
 
 ### §2.2. `families` (11 колонок)
 
@@ -437,6 +443,62 @@ CONCATENATE("Начисления за текущий период (", ANY(setti
 
 Реализация через CONCATENATE с подстановкой `dash_пред_период`, `current_period`, COUNT.
 
+### §3.12. Action chain «Выбытие ученика» (NEW в pre-#08.1)
+
+**Проблема:** «Выбытие» = транзакция из 4 операций в двух таблицах: `students` (`end_date`, `status`, `class_group`) + `student_tariffs` (delete всех строк ученика). Плюс UX-требование — ручной выбор даты пользователем.
+
+**Путь 1 (Action with Inputs)** не сработал: секция Inputs **отсутствует** в AppSheet 1.000444. Обнаружено в pre-#08.1, см. §6.9.
+
+**Путь 2 — реализован.** Архитектура — Slice + Form view + LINKTOROW + Form Saved + Grouped action.
+
+**Артефакты:**
+
+| # | Артефакт | Описание |
+|---|---|---|
+| 1 | Колонка `students[withdrawal_date]` | Date, `Show? = false`. Служебная — буфер даты до применения транзакции. |
+| 2 | Slice `students_withdrawal` | Source: students, Columns: `student_id` (Key) + `withdrawal_date`, Update mode: **Updates only** (не Adds — критично, иначе появляется кнопка «+»). |
+| 3 | Form view `students_withdrawal_form` | Position: ref, For data: `students_withdrawal`, Column order Manual: только `withdrawal_date`. Display name: «Дата выбытия». **Form Saved** event → action `students__withdrawal_apply`. |
+| 4 | Action `students__withdrawal` | **Видимый**, на таблице `students`. Тип: `App: go to another view within this app`. Target: `LINKTOROW([_THISROW], "students_withdrawal_form")`. Position: Prominent. Display name: «выбытие». Confirmation: `TRUE`. Confirmation Message: `CONCATENATE("Вы уверены, что ученик ", [first_name], " ", [last_name], " заканчивает обучение в периоде ", ANY(settings[current_period]), "?")`. Show_If: `AND([status]="Активен", LOOKUP(USEREMAIL(),"users","email","role")="ADMIN")`. |
+| 5 | Action `students__withdrawal_apply` | **Скрытый** (Position: Hide), Grouped. Содержит шаги: (1) `students__withdrawal_set_fields`, (2) `students__delete_tariffs`. |
+| 6 | Action `students__withdrawal_set_fields` | **Скрытый**, на `students`. Тип: `Data: set the values of some columns in this row`. Sets: `end_date = [withdrawal_date]`, `status = "Выбыл"`, `class_group = ""`. |
+| 7 | Action `students__delete_tariffs` | **Скрытый**, на `students`. Тип: `Data: execute an action on a set of rows`. Referenced table: `student_tariffs`. Referenced rows: `SELECT(student_tariffs[assignment_id], [student_id]=[_THISROW].[student_id])`. Referenced action: `student_tariffs__delete_one`. |
+| 8 | Action `student_tariffs__delete_one` | **Скрытый**, на `student_tariffs`. Тип: `Data: delete this row`. Вспомогательный — единичное удаление, вызывается из (7). |
+
+**UX-поток:**
+1. Пользователь нажимает «выбытие» в карточке ученика → Confirmation с именем и периодом.
+2. Подтверждает → AppSheet открывает `students_withdrawal_form` через `LINKTOROW` (форма в режиме редактирования существующей строки).
+3. Пользователь выбирает дату → Save.
+4. Form Saved триггерит Grouped `students__withdrawal_apply`:
+   - Set: `end_date=[withdrawal_date]`, `status="Выбыл"`, `class_group=""`.
+   - Delete: все `student_tariffs` ученика.
+
+**Почему `LINKTOROW`, а не `LINKTOFORM`:** см. §6.9 и BP-47.
+
+### §3.13. Прочие actions UX-уровня (pre-#08, pre-#08.1)
+
+**`families__add_student`** (pre-#08, на таблице `families`):
+- Тип: `App: go to another view within this app`.
+- Target: `LINKTOFORM("students_Form", "family_id", [family_id])`.
+- Position: Prominent. Display name: «добавить ребёнка».
+- Show_If: `LOOKUP(USEREMAIL(),"users","email","role")="ADMIN"`.
+- Открывает форму создания ученика с предзаполненной семьёй. **Здесь `LINKTOFORM` правомерен — создаётся новая запись.**
+
+**Форма `students_Form`** (системная, настроена в pre-#08):
+- Column order: Manual — `_form_header_students`, `first_name`, `last_name`, `family_id`, `class_group`, `start_date`, `birth_date` (NEW в pre-#08.1), `comment`.
+- `status` и `end_date` **не включены** в Column order (скрыты при создании, видны только в Detail view существующих учеников через `Show_If = ISNOTBLANK([student_id])`).
+- `students[status]` Initial Value = `"Активен"`.
+
+**Унификация Detail view** (pre-#08.1):
+- Все `*_id` колонки (`charge_id`, `expense_id`, `payment_id`) — `Show? = false`.
+- Все `created_at` — Display name = «создан».
+- `expenses[period]` — Display name = «период». Delete action — Position: Prominent (для исправления ошибочных расходов).
+- `payments`: `class_group`, `_ComputedKey` — `Show? = false`.
+
+**Очистка view-фильтров** (pre-#08.1):
+- `settings → action Delete` на блоке фильтра — Position: Hide.
+- `payments_filtered`, `expenses_filtered` Slices — Update mode: Read-Only (был Updates+Adds+Deletes).
+- `payments_filtered_Form` view — удалён (конфликт: form view на Read-Only slice).
+
 ---
 
 ## §4. Closure architecture (закрытие периода)
@@ -685,6 +747,43 @@ AND(
 
 Один из 6 прогонов закончился с Error. Не расследован. Не блокер.
 
+### §6.8. `_ComputedName` для выбывших учеников (NEW в pre-#08.1)
+
+**Проблема:** в Detail view ученика `_ComputedName` отображается **всегда** как Header column. Формула (§3.5):
+```
+CONCATENATE([first_name], " ", [last_name], " (", [class_group], ")")
+```
+
+После выбытия `class_group` очищается → имя становится `Иванов Иван ()` (пустые скобки). Гипотеза стратега «закроется через `class_group=""`» **не подтвердилась** — внутри скобок остаётся пусто, скобки видны.
+
+**Варианты решения** (требуют архитектурного выбора):
+1. Переписать `_ComputedName` с условием: `IF([status]="Выбыл", CONCATENATE([first_name], " ", [last_name]), CONCATENATE([first_name], " ", [last_name], " (", [class_group], ")"))`.
+2. Сменить Header column на `first_name` + `last_name` без класса.
+
+Не блокер для запуска 01.06.2026. Решать после #8.
+
+### §6.9. VC игнорируют Column order в Detail view (NEW в pre-#08.1)
+
+**Поведение AppSheet:** виртуальные колонки (`debt`, `overdue_debt`, и др.) рендерятся в Detail view **после** физических, независимо от порядка в Column order Manual. Обход не найден.
+
+**Последствие для проекта:** в карточке ученика `debt` и `overdue_debt` всегда внизу, рядом с Related-секциями. Эстетика страдает, функционально работает.
+
+**Не блокер.** Принять как ограничение AppSheet.
+
+### §6.10. Action with Inputs недоступен в текущей версии AppSheet (NEW в pre-#08.1)
+
+**Контекст:** в брифе pre-#08.1 §4.1 предложен Путь 1 — Action with Inputs (свежая фича AppSheet). На версии 1.000444 секция Inputs **отсутствует** в редакторе actions. Реализован Путь 2 (Slice + Form view + LINKTOROW).
+
+**Хвост:** при обновлении AppSheet до версии с Inputs — рассмотреть упрощение архитектуры выбытия (избавиться от служебной колонки `withdrawal_date`, Slice `students_withdrawal`, Form view `students_withdrawal_form`). Не блокер, чисто эстетика.
+
+### §6.11. Предупреждение в `students_withdrawal_form` (NEW в pre-#08.1)
+
+В форме выбытия AppSheet показывает информационное предупреждение: `Table students_withdrawal does not allow new entries`. Не мешает работе.
+
+**Причина:** Slice `students_withdrawal` имеет Update mode = Updates only (без Adds). Это критично — иначе появится кнопка «+» в форме.
+
+**Решение:** оставить как есть. Принципиально не лечится без ухудшения UX.
+
 ---
 
 ## §7. Best Practices (BP)
@@ -724,6 +823,21 @@ AND(
 **BP-44. Формула Branch с проверкой «есть ли charges за следующий период» вызывает каскадирование.**
 После каждого закрытия `current_period` сдвигается на этот «следующий», и проверка перестаёт срабатывать. Правильное решение — **календарная привязка** (см. §4.7) + проверка наличия начислений за `current_period`.
 
+### §7.3. Из ветки pre-#08.1 (UX и actions)
+
+**BP-45. `LINKTOFORM` всегда открывает форму создания, не редактирования.**
+Передача KEY существующей строки **не помогает** — AppSheet выдаёт ошибку `There is already a row with the key: '<KEY>'`. Для редактирования существующей строки через форму использовать **`LINKTOROW`**:
+```
+LINKTOROW([_THISROW], "form_view_name")
+```
+Требования: целевой Form view на Slice с `Update mode: Updates only` (без Adds). Источник: pre-#08.1 §3, обнаружено при попытке вызвать форму выбытия по существующему ученику.
+
+**BP-46. Grouped action не вызывает actions других таблиц напрямую.**
+Если в один UX-шаг нужны изменения в родительской и дочерней таблицах — использовать связку: `Data: set the values` (родитель, Hide) + `Data: execute an action on a set of rows` (дочерняя таблица, Hide) + `Grouped` обёртка. Удаление строк дочерней таблицы — через вспомогательный action `Data: delete this row` на дочерней (вызывается через execute on a set of rows). Источник: pre-#08.1 §3, реализация выбытия.
+
+**BP-47. Form Saved event — точка применения транзакции.**
+Когда транзакция требует пользовательского ввода (например, ручной выбор даты), а Action with Inputs недоступен, паттерн такой: `LINKTOROW` открывает форму на Slice → пользователь сохраняет → Form Saved event запускает скрытый action или Grouped action с финальной транзакцией. Confirmation вешается на исходный action (срабатывает **до** открытия формы, что даёт UX вариант «подтверди намерение → потом введи данные»).
+
 ---
 
 ## §8. Карта подводных камней AppSheet
@@ -740,6 +854,9 @@ AND(
 8. **Same-table reference action** разрешён.
 9. **KEY-колонку нельзя скрыть на writable-таблице.** Обход: read-only Slice.
 10. **VC внутри Bot transaction:** значения пересчитываются лениво. Если в шаге `Set row values` обращаться к VC, можно получить pre-commit состояние.
+11. **`LINKTOFORM` ≠ `LINKTOROW`.** LINKTOFORM открывает форму создания, LINKTOROW — редактирования существующей строки. См. BP-45.
+12. **VC рендерятся после физических колонок в Detail view** независимо от Column order. См. §6.9.
+13. **Action with Inputs** — относительно свежая фича AppSheet, может отсутствовать в старых версиях редактора. Fallback — Slice + Form view + LINKTOROW.
 
 Дополнительный источник — `sonnet-skills/appsheet-setup-SKILL.md` (накопленный опыт Sonnet'а по проекту, ~880 строк, Stages A–K).
 
@@ -748,6 +865,7 @@ AND(
 ## §9. История версий документа
 
 - **0.1** (08.05.2026) — первый сбор. Источник: бэкапы v8, v8-fix, v9, v10, v11, v12.1 + arch-session-td1.
+- **0.2** (09.05.2026) — синхронизация с отчётами pre-#08 и pre-#08.1. Состав `students` обновлён (21 колонка, +`withdrawal_date`, +`birth_date`). Добавлены §3.12 «Action chain Выбытие», §3.13 «Прочие actions UX-уровня» (`families__add_student`, `students_Form`, унификация Detail view, очистка фильтров). Добавлены хвосты §6.8–§6.11 (`_ComputedName`, VC vs Column order, Action with Inputs недоступен, предупреждение в form). Добавлен §7.3 с BP-45..BP-47 (LINKTOROW, Grouped+cross-table, Form Saved). §8 расширена пунктами 11–13.
 
 ---
 

@@ -39,6 +39,11 @@ Pre-#08 закрыл базовые UX-проблемы (форма создан
 6. **На view-фильтрах (начисления/платежи/расходы) лишние Edit/Delete/Add** — могут привести к случайным изменениям.
 7. **В карточке расхода нет Delete** — невозможно удалить ошибочно внесённый расход.
 
+**Связь с хвостами из отчёта pre-#08 §9:**
+- Хвост №1 (`_ComputedName` для выбывших — класс в имени) — закрывается косвенно через §4.1.2 (`class_group = ""` при выбытии). Если формула `_ComputedName` опирается на `[class_group]` — проблема снимется автоматически. Проверить в тестах §7.6.
+- Хвост №2 (деактивация `student_tariffs` при выбытии) — полностью закрывается §4.1.3 (удаление строк).
+- Хвост №3 (ручной выбор даты выбытия вместо `TODAY()`) — полностью закрывается §4.1.1.
+
 ### §1.2. Что меняем (резюме)
 
 - §4.1. Расширение action «Выбытие»: + очистка `class_group` + удаление `student_tariffs` + Confirmation.
@@ -92,44 +97,64 @@ Pre-#08 закрыл базовые UX-проблемы (форма создан
 
 ### §4.1. Расширение action «Выбытие»
 
-**Контекст:** в pre-#08 создан action `students__withdrawal` (одна транзакция: `end_date` + `status="Выбыл"`). По решению владельца этой сессии — расширяем.
+**Контекст:** в pre-#08 создан action `students__withdrawal` (одна транзакция: `end_date = TODAY()` + `status="Выбыл"` + Confirmation). Состояние на входе в pre-#08.1 — см. отчёт pre-#08 §5. Расширяем по трём осям: ручной выбор даты выбытия, очистка `class_group`, удаление `student_tariffs`.
 
-**Что добавить:**
+**Что добавить к существующему action:**
 
 | # | Что | Зачем |
 |---|-----|-------|
-| 4.1.1 | `class_group` = пусто | Выбывший не должен маячить в группах класса |
-| 4.1.2 | Удалить все строки `student_tariffs` где `[student_id] = THISROW.[student_id]` | В карточке выбывшего не должны висеть привязки тарифов. Историю не сохраняем (Р-14, БД компактнее) |
-| 4.1.3 | Confirmation Message | Защита от случайного клика |
+| 4.1.1 | Ручной выбор `end_date` пользователем (вместо `TODAY()`) | Дата выбытия может отличаться от дня нажатия кнопки |
+| 4.1.2 | `class_group` = пусто | Выбывший не должен маячить в группах класса |
+| 4.1.3 | Удалить все строки `student_tariffs` где `[student_id] = THISROW.[student_id]` | В карточке выбывшего не должны висеть привязки тарифов. Историю не сохраняем (Р-14, БД компактнее) |
 
-**Реализация:**
+**Confirmation уже существует** (добавлен в pre-#08, §5 отчёта). Переиспользуем как есть, **не дублировать**:
+```
+CONCATENATE("Вы уверены, что ученик ", [first_name], " ", [last_name], " заканчивает обучение в периоде ", ANY(settings[current_period]), "?")
+```
 
-**Шаг 1 — расширение `students__withdrawal`:**
-- Set columns добавить:
-  - `end_date` = `[withdrawal_date]` (уже есть из pre-#08).
-  - `status` = `"Выбыл"` (уже есть из pre-#08).
-  - `class_group` = `""` (новое).
-- `Needs confirmation?` = `TRUE`.
-- `Confirmation Message`:
-  ```
-  CONCATENATE("Вы уверены, что ученик ", [first_name], " ", [last_name], " заканчивает обучение в периоде ", ANY(settings[current_period]), "?")
-  ```
+**Целевая последовательность (UX вариант А):**
+1. Пользователь жмёт «Выбытие».
+2. Видит Confirmation → Да/Нет.
+3. Если Да — открывается форма с одним полем (выбор даты выбытия).
+4. Сохраняет → транзакция применяется (`end_date`, `status`, `class_group`, удаление `student_tariffs`).
 
-**Шаг 2 — добавить второе действие, которое удалит `student_tariffs`.**
+---
 
-Это **Composite action** или последовательность:
-- Создать вспомогательный action `student_tariffs__delete_one` (тип: `Data: delete this row`, table: `student_tariffs`).
-- В `students__withdrawal` добавить шаг **«Execute an action on a set of rows»**:
+**Реализация — два пути, в порядке приоритета.**
+
+**Путь 1 (предпочтительный) — Action with input.**
+
+Если ваша версия AppSheet поддерживает (относительно свежая фича — проверить наличие в UI: Behavior → Actions → у `Data: set the values of some columns in this row` появляется секция «Inputs»):
+
+- В `students__withdrawal` добавить **Input** с именем `withdrawal_date`, тип `Date`, обязательное.
+- В Set columns: `end_date = [withdrawal_date]` (вместо `TODAY()`), `class_group = ""`.
+- Confirmation остаётся.
+- **Что произойдёт:** после подтверждения Confirmation AppSheet сам откроет диалог ввода даты, потом применит транзакцию. Без новых колонок и Slice.
+
+**Путь 2 (fallback, если Inputs недоступны) — Slice + Form view + LINKTOFORM.**
+
+- Добавить колонку `students[withdrawal_date]` тип Date в Sheets, Regenerate Schema.
+  - `Show?` = `FALSE` в Detail view (служебная, не показываем как обычное поле).
+  - `Require?` = `FALSE` в общей форме создания.
+- Создать Slice `students_withdrawal` (source: `students`, all columns, Updates only).
+- Создать Form view `students_withdrawal_form` на этом Slice, Column order: только `withdrawal_date`.
+- Изменить `students__withdrawal`: тип сменить на `App: go to another view within this app`, Target: `LINKTOFORM("students_withdrawal_form", "withdrawal_date", TODAY())` (TODAY как дефолт в форме, пользователь меняет).
+- Confirmation — оставить на этом же action (срабатывает до открытия формы).
+- На Form Saved этого view — повесить отдельный action `students__withdrawal_apply` типа `Data: set the values of some columns in this row`:
+  - `end_date = [withdrawal_date]`,
+  - `status = "Выбыл"`,
+  - `class_group = ""`.
+
+**Удаление `student_tariffs` (общий шаг для обоих путей):**
+
+- Создать вспомогательный action `student_tariffs__delete_one` (`Data: delete this row`, table: `student_tariffs`).
+- Добавить в `students__withdrawal` (Путь 1) или `students__withdrawal_apply` (Путь 2) шаг **«Execute an action on a set of rows»**:
+  - Referenced table: `student_tariffs`.
   - Referenced rows: `SELECT(student_tariffs[assignment_id], [student_id] = [_THISROW].[student_id])`.
   - Referenced action: `student_tariffs__delete_one`.
+- Если для последовательности шагов нужен **Grouped action** — обернуть, Confirmation вешать на Grouped в целом (только для Пути 1; в Пути 2 Confirmation на исходном action, цепочка через Form Saved).
 
-**Альтернатива (если AppSheet не позволит сделать это одним action):**
-- Сделать `students__withdrawal` как **Grouped action** из двух шагов:
-  - Шаг 1: Set values (end_date, status, class_group).
-  - Шаг 2: Execute on a set of rows (удаление student_tariffs).
-- Confirmation вешать на Grouped action в целом.
-
-**В отчёт:** какой вариант сработал, какие ограничения встретились.
+**В отчёт:** какой путь сработал (1 или 2), какие ограничения встретились, итоговая структура actions.
 
 ### §4.2. Поле `students[birth_date]`
 
@@ -236,6 +261,17 @@ Pre-#08 закрыл базовые UX-проблемы (форма создан
 
 ## §6. Дисциплина исполнителя
 
+### §6.0. Базовые SKILL'ы исполнителя
+
+Перед началом работы прочитать оба файла. Применяются ко всем брифингам Sonnet в проекте.
+
+| Файл | Роль |
+|---|---|
+| `sonnet-skills/sonnet-behavior-SKILL.md` | **Как себя вести.** Один шаг за раз, конкретные UI-инструкции, без избыточных объяснений, fallback вместо костылей, промежуточная проверка после каждой задачи, поднимать непонятное через владельца к стратегу. |
+| `sonnet-skills/appsheet-setup-SKILL.md` | **Что знать про AppSheet.** Накопленные паттерны, подводные камни, прецеденты Q.1–Q.N. **Первый источник** по механикам AppSheet — перед поиском в официальной документации. |
+
+### §6.1. Дисциплина
+
 | # | Правило |
 |---|---------|
 | 6.1 | Никаких диагностических формул в живых Sheets. |
@@ -253,16 +289,18 @@ Pre-#08 закрыл базовые UX-проблемы (форма создан
 
 После всех правок — прогон от лица ADMIN.
 
-### §7.1. Сценарий выбытия (расширенный)
+### §7.1. Сценарий выбытия (расширенный, с ручным выбором даты)
 
 | # | Шаг | Ожидаемое |
 |---|-----|-----------|
-| 7.1.1 | Открыть карточку тестового активного ученика с привязанными тарифами и заданным `class_group` | Карточка открывается |
-| 7.1.2 | Нажать «Выбытие», выбрать дату | Появляется Confirmation с правильным именем и периодом |
-| 7.1.3 | Подтвердить | Транзакция применяется |
-| 7.1.4 | Проверить в Sheets / в карточке | `end_date` = дата, `status="Выбыл"`, `class_group` пусто, в `student_tariffs` строки этого ученика отсутствуют |
-| 7.1.5 | Запустить `bot_close_period` (тестово) | За этого ученика начислений не создалось |
-| 7.1.6 | Отмена в Confirmation | Если на шаге 7.1.2 нажать «Отмена» — ничего не меняется |
+| 7.1.1 | Открыть карточку тестового активного ученика с привязанными тарифами и заданным `class_group` | Карточка открывается, кнопка «Выбытие» видна |
+| 7.1.2 | Нажать «Выбытие» | Появляется Confirmation с правильным именем и периодом — **до** открытия формы выбора даты |
+| 7.1.3 | Подтвердить Confirmation | Открывается форма / диалог с полем выбора даты (Путь 1: input от AppSheet; Путь 2: Form view) |
+| 7.1.4 | Выбрать дату (например, вчерашнюю) и сохранить | Транзакция применяется |
+| 7.1.5 | Проверить в Sheets / в карточке | `end_date` = выбранная дата, `status="Выбыл"`, `class_group` пусто, в `student_tariffs` строк этого ученика нет |
+| 7.1.6 | Запустить `bot_close_period` (тестово) | За этого ученика начислений не создалось |
+| 7.1.7 | Отмена в Confirmation на другом активном ученике | Форма не открывается, ничего не меняется |
+| 7.1.8 | Отмена на этапе формы выбора даты (закрыть форму без сохранения) | Ничего не меняется (Путь 2 — критично проверить, что Form Saved action не сработал) |
 
 ### §7.2. Сценарий с `birth_date`
 
@@ -381,17 +419,28 @@ Pre-#08 закрыл базовые UX-проблемы (форма создан
 
 ## §10. Контрольная сумма
 
-Если выполнен весь брифинг, в проекте появится **ровно**:
+Если выполнен весь брифинг, в проекте появится **ровно** (вилка по §4.1 в зависимости от пути):
 
+**Общее (оба пути §4.1):**
 - 1 новая колонка: `students[birth_date]`.
 - 1 новый Slice: `students_visible`.
 - 0 новых таблиц.
 - 0 новых VC.
-- 1 расширенный action: `students__withdrawal` (+ Confirmation, + class_group, + удаление student_tariffs).
-- 0 или 1 новый вспомогательный action (`student_tariffs__delete_one`, если этот путь сработает).
+- 1 расширенный action: `students__withdrawal` (+ class_group + удаление student_tariffs + ручной выбор даты).
+- 1 новый вспомогательный action: `student_tariffs__delete_one` (`Data: delete this row` на student_tariffs).
 - N изменений `Show?`/Display name на колонках Detail view (точное количество — в отчёте §6).
 - 1 системный Delete добавлен на Detail view расходов.
 - 6 точек где убраны лишние Edit/Delete/Add (в трёх view-фильтрах × 2 блока).
+
+**Дополнительно по Пути 1 (Action with input):**
+- 1 Input на action `students__withdrawal` (`withdrawal_date`, Date).
+
+**Дополнительно по Пути 2 (Slice + Form view):**
+- 1 новая колонка: `students[withdrawal_date]` (Date, Show? = FALSE).
+- 1 новый Slice: `students_withdrawal`.
+- 1 новый Form view: `students_withdrawal_form`.
+- 1 новый action: `students__withdrawal_apply` (Form Saved event).
+- (Возможно) 1 Grouped action, если последовательность шагов потребует.
 
 Если по ходу появилось что-то ещё — это либо смежный хвост (§6.2 — только в отчёт), либо нарушение брифинга (§9 — стоп, согласовать).
 
