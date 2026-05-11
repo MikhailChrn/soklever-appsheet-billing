@@ -1,6 +1,6 @@
 ---
 name: appsheet-setup
-version: 2.14
+version: 2.16
 description: >
   Step-by-step guide for setting up AppSheet applications connected to Google Sheets.
   Use this skill whenever a user wants to: create an AppSheet app from scratch, configure
@@ -20,7 +20,7 @@ description: >
   but need AppSheet UI guidance.
 ---
 
-# AppSheet Setup Guide v2.12
+# AppSheet Setup Guide v2.17
 
 This skill captures the end-to-end setup of a production AppSheet app connected to Google Sheets.
 
@@ -119,7 +119,7 @@ AppSheet auto-generates forms. To customize:
 
 **⚠️ Form Column order Manual:** When switching to Manual and adding columns, add ONLY columns from that table. AppSheet may inject columns from other tables (e.g., `settings`) into the list — these must not be included.
 
-**Form title / section header:** AppSheet does not have a dedicated form title field. Use a virtual column of type Show / Section_Header as the first column in the form. See Section L for details.
+**Form title / section header:** AppSheet does not have a dedicated form title field. Use a virtual column of type `Show` with category `Section_Header` as the first column in the form. See **Q.16** for the full pattern.
 
 **⚠️ KEY column cannot be hidden via Show?** on a writable table. To hide a KEY column from a form, use Column order Manual and simply do not add it to the list. Alternatively, set the table to Updates-only first.
 
@@ -908,6 +908,156 @@ AND(
 **Side-effect:** the Slice in Q.12/Q.13 will show the warning `Table <slice_name> does not allow new entries` when the form opens. This is informational and harmless — it's the price of `Update mode: Updates only`. Switching to `Updates+Adds` would silence the warning but expose a `+` button in the form, which is worse UX. Leave the warning.
 
 **Source:** pre-#08.1 §3 (withdrawal flow) + §10 (warning analysis).
+
+### Q.14 LABEL trap when toggling Show on the labeled column
+
+**Problem:** A column marked as LABEL is the source of the row's title in inline lists, deck views, and Detail header (when used as Header column). When you uncheck **Show** on that column intending to hide it from the Detail field list, AppSheet **silently re-assigns LABEL to another visible column** (typically the next physical column like `first_name`). Result: the inline list and Detail header start showing only the partial value (e.g., "Артём" instead of "Артём Петров").
+
+**Even worse:** simply re-checking Show on the original column does NOT restore LABEL. AppSheet keeps LABEL on the new captor column, and the editor will not let you turn LABEL back on the original until you first un-check LABEL on the captor.
+
+**Correct sequence to hide a LABEL-bearing column from the field list while keeping the title intact:**
+
+1. Verify which column currently holds LABEL (Data → table → look for the 🏷️ icon).
+2. If you want to keep that column as the title source — **leave LABEL on it** and proceed.
+3. **Uncheck Show** on that same column. The Header column setting in Detail view continues to render the value (Header column reads the value independently of Show).
+4. Verify: open the Detail view of any row — header shows the full computed name, the field list no longer shows the duplicate row.
+
+**If the title breaks (only partial value shown after step 3):**
+
+1. Find which column LABEL jumped to (Data → table → 🏷️).
+2. Uncheck LABEL on that captor column.
+3. Re-check LABEL on the original column.
+4. Verify Show on the original is `false` (your intent), title is correct.
+
+**Source:** discovered 09.05.2026 while cleaning up `_ComputedName` duplication in `students_visible_Detail`. The first attempt (just unchecking Show) silently moved LABEL to `first_name`; the inline list lost surnames; re-checking Show did not restore the state. Resolution required manually moving LABEL back.
+
+### Q.15 Header column renders independently of Show
+
+**Pattern:** A column referenced in **Header column** of a Detail view (UX → Views → `<view>_Detail` → View Options → Header column) is rendered as the large title at the top of each Detail card. **This rendering ignores the Show flag of the column.**
+
+This means: to display a computed name (e.g., `_ComputedName = CONCATENATE([first_name], " ", [last_name])`) only as the header, without duplicating it as a row in the field list:
+
+1. On the column: keep LABEL = ✅ (so deck/inline views also use it as the row title).
+2. On the column: set Show = false (suppresses the duplicate row in Detail field list).
+3. In Detail view: keep the column listed under Header column.
+
+The header continues to render correctly because Header column has its own pipeline.
+
+**Source:** confirmed 09.05.2026 on `students_visible_Detail` with `_ComputedName`.
+
+---
+
+### Q.16 Form header via Section_Header virtual column
+
+**Problem:** AppSheet form views have no dedicated "form title" or "header text" field. A form's Display name controls the navigation entry/breadcrumb, not a visible header inside the form.
+
+**Pattern:** Use a virtual column of type **Show** with category **Section_Header**. Place it as the **first** column in the form's Column order. The VC's Display name renders as a section header at the top of the form.
+
+| Parameter | Value |
+|---|---|
+| Column name | `_form_header_<table>` (convention) |
+| Type | `Show` |
+| Category | `Section_Header` |
+| App formula | `""` (empty string) |
+| Display name | The header text user should see, e.g. `"Создать/редактировать тариф"` |
+| Show? | ✅ true |
+
+**Where to add:** Data → `<table>` → `+` (add virtual column) → set parameters above. Then UX → Views → `<table>_Form` → Column order Manual → put `_form_header_<table>` first.
+
+**Why this works:** `Show` columns of category `Section_Header` are rendered specifically as visual section dividers/headers in form layout. They have no input control and no data binding — purely presentational.
+
+**Use case in this project:** AppSheet does not let two form views (one for Add, one for Edit) coexist on the same table without the system Add action perversely binding to the wrong one (see Q.17). The pragmatic compromise is a single form view with a unified header text such as `"Создать/редактировать <X>"` — same form serves both Add and Edit, header always reads correctly regardless of mode.
+
+**Source:** pre-#08.3, 10.05.2026. Replaces the broken reference in Section F line 122 to a never-written "Section L."
+
+---
+
+### Q.17 Add/Edit form routing — single form view limitation (May 2026)
+
+**Background:** Trying to give Add and Edit different headers by creating two form views (`*_Form` for Add, `*_Form_Edit` for Edit) and routing Edit through a custom action with `LINKTOROW`. The Edit half worked. The Add half failed in every attempted variant.
+
+**What does NOT work** (verified May 2026):
+
+1. **Position = `ref` on `*_Form_Edit`.** Does not stop the system Add from binding to it. AppSheet's `+` button can still select the Edit form when invoked from the deck/table view.
+2. **Action type `App: open a form to add a new row` with explicit Target.** In the current editor (May 2026), the **Target form view selector is missing** for this action type. Cannot direct Add to a specific form view this way.
+3. **Renaming the Edit form with a `z_` prefix** to push it later alphabetically. Does not help — AppSheet's system Add caches the bound form by internal ID, not by name. After rename, `+` still opens the (now-renamed) Edit form, breadcrumb shows the new name (`z tariffs Form Edit`).
+4. **Editing the system Add action's Target.** It is **read-only** in the current editor — cannot be redirected.
+5. **Deck view → Behavior → Event Actions.** No "Add" event in the current editor — only `Row Selected` and `Row Swiped`. There is no UI affordance to override what `+` does at the view level.
+
+**Conclusion:** In the current AppSheet editor, **two form views per table cannot be reliably split into Add-only and Edit-only roles** without external Add wiring (and that wiring is itself unavailable, per points 2 and 4).
+
+**Pragmatic resolution:** keep one form view per table. Use a single Section_Header VC (Q.16) with a header text that reads correctly for both Add and Edit — e.g., `"Создать/редактировать тариф"`. Semantics merge, but the UX problem (operator opens form, gets distracted, returns 15 seconds later, cannot tell what they were doing) is resolved.
+
+**Source:** pre-#08.3, 10.05.2026. Three failed paths (LINKTOROW + system Edit override; rename with `z_` prefix; delete-and-recreate) confirmed by strategist after live testing. Recorded so successors don't waste hours rediscovering the limit.
+
+---
+
+## Section R — Slices and System-Generated Views
+
+### R.1 Each Slice has its own auto-generated Detail/Form/Inline views
+
+When a Slice is created, AppSheet automatically generates a separate set of system views for it: `<slice_name>_Detail`, `<slice_name>_Form`, `<slice_name>_Inline`. These exist **alongside** the system-generated views for the underlying table (`<table>_Detail`, etc.).
+
+**Implication:** if a primary view (e.g., a deck named "ученики") is built on a Slice, then clicking a row opens **`<slice>_Detail`** — not `<table>_Detail`. Editing `<table>_Detail` (Column order, Header column, etc.) has **no effect** on what users see.
+
+**How to identify which Detail view is actually live:**
+1. UX → Views → primary navigation → click the entry-point view → **For this data** field shows either a table name or a slice name.
+2. If it's a slice, the live Detail view is `<slice>_Detail` under SYSTEM GENERATED.
+3. Configure that one (Column order Manual, Header column, etc.).
+
+**Implication for cleanup:** if `<table>_Detail` is no longer reachable from any navigation path (because all entry-points use slices), it becomes a dead view. Candidate for deletion in a cleanup pass.
+
+**Source:** discovered 09.05.2026. Primary view "ученики" was built on slice `students_visible` (introduced in pre-#08.1). All Column order Manual edits to `students_Detail` had been ineffective because `students_visible_Detail` was the live view.
+
+---
+
+### R.2 Slice Update mode = Read-Only blocks system actions in slice-Detail
+
+When a Slice has `Update mode = Read-Only`, AppSheet **hides** the system Edit/Delete actions in the slice's auto-generated Detail view — even when:
+- The system action on the underlying table has a correctly-configured `Only if this condition is true` (Show_If) expression.
+- The user role would otherwise have edit/delete permission.
+
+The Show_If on the action is **not** the reason the button is missing. The button is suppressed at the slice layer, before Show_If is evaluated.
+
+**Symptom:** "Edit/Delete button is visible when opening a row through the table's system Detail view, but missing when opening the same row through `<slice>_Detail` (e.g., a filter view built on a slice)."
+
+**Fix:** open the slice (Data → Slices → `<slice_name>`) and check **Update mode**. To allow Edit/Delete in the slice-Detail, ensure **Updates** and/or **Deletes** are toggled on (not Read-Only). The Show_If on the system action continues to enforce row-level visibility — security is preserved.
+
+**Note:** In May 2026 (AppSheet 1.000535) the Update mode selector has four mutually-related toggles: **Updates / Adds / Deletes / Read-Only**. Read-Only is the override that disables the other three at the slice level.
+
+**Source:** pre-#08.6, 11.05.2026. Three slices (`charges_filtered`, `payments_filtered`, `expenses_filtered`) had Read-Only set. Edit/Delete were invisible in `*_filtered_Detail` despite proper Show_If on the system actions on `charges`/`payments`/`expenses`. Switching to Updates+Deletes restored visibility. Show_If conditions kept blocking edit/delete on closed-period rows as intended.
+
+---
+
+### R.3 Mobile slice-Detail may suppress Prominent actions even when desktop shows them
+
+**Symptom (May 2026):** in the same Detail view (slice-Detail), on **desktop** the Delete and Edit buttons both render in the top action bar; on **mobile**, only the Edit FAB (bottom-right) is visible — Delete (Position = Prominent) is missing.
+
+**What does not explain it:**
+- Slice Update mode: confirmed `Updates + Deletes` on all three slices.
+- System action Position: identical (`Edit = Primary`, `Delete = Prominent`) across `charges`, `payments`, `expenses`.
+- Slice Actions: identical (`Auto assign`) across all three.
+
+**What partially explains it:** at least one comparable slice in the same app (`payments_filtered`) **does** show Delete on mobile under the same nominal settings. So a configuration difference exists somewhere — but it is not in the Position/Update-mode/Slice-Actions fields visible in the editor.
+
+**Status (11.05.2026): open floating defect.** Root cause not identified. Tested resolution paths and what was learned:
+
+1. **App foregrounding** (screen off / on) — owner reported Delete appearing after the device wakes. Initially suggested a render-on-foreground refresh. Not a reliable resolution: same view reopened later showed Delete missing again.
+2. **Full logout/login** on the AppSheet mobile app — **did not help**. The configuration is fully re-fetched after login, so the issue is not a stale client cache.
+
+**Refined pattern (after logout test):** the visibility of Delete on mobile correlates with the **entry route** to the Detail view, not with the slice itself:
+- Entering a row through a **filter-view** built on a slice (e.g., `фильтр начислений`, `фильтр расходов`) → Delete missing on mobile (visible on desktop).
+- Entering the same row through a **non-filter route** (e.g., payment from the student's card; expense from the expenses menu list) → Delete visible on mobile.
+
+This means the mobile renderer treats Detail-via-filter-slice differently from Detail-via-deck/table or Detail-via-related-inline, even when Position = Prominent. Desktop does not show the asymmetry.
+
+**Untested hypotheses, recorded for future work:**
+1. Try `Position = Primary` instead of `Prominent` on the system Delete — see if Primary survives the filter-view route on mobile (puts the icon in the top-right overflow instead of the bottom FAB).
+2. Inspect whether the filter-view (`фильтр начислений` etc.) has any view-level Action filtering setting that hides Prominent buttons on small viewports.
+
+**Workaround / accepted state:** desktop is the primary admin workflow. Show_If still enforces the closed-period guard regardless of which actions render. The mobile gap was accepted as a floating defect rather than chased further.
+
+**Source:** pre-#08.6, 11.05.2026. Observed on `charges` and `expenses` filter-view route on mobile; `payments` route from the student card on the same device rendered Delete normally. Full mobile logout/login did not resolve.
 
 ---
 
