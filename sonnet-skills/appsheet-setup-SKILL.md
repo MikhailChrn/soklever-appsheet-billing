@@ -1,6 +1,6 @@
 ---
 name: appsheet-setup
-version: 2.16
+version: 2.19
 description: >
   Step-by-step guide for setting up AppSheet applications connected to Google Sheets.
   Use this skill whenever a user wants to: create an AppSheet app from scratch, configure
@@ -20,7 +20,7 @@ description: >
   but need AppSheet UI guidance.
 ---
 
-# AppSheet Setup Guide v2.17
+# AppSheet Setup Guide v2.19
 
 This skill captures the end-to-end setup of a production AppSheet app connected to Google Sheets.
 
@@ -992,6 +992,54 @@ The header continues to render correctly because Header column has its own pipel
 
 ---
 
+### Q.18 ⚠️ CRITICAL — Virtual Columns inside Bot transactions read a frozen snapshot
+
+**The rule:** if a value must be **fresh** at the moment a Bot runs, it MUST be a **physical column**, not a Virtual Column. Inside a bot transaction AppSheet reads VCs (and `SELECT()`/`ANY()` across tables) from a **frozen snapshot** of all tables — that snapshot does NOT recompute during bot execution and can lag behind reality by minutes or hours.
+
+**Symptom that revealed this (project incident, 12-13.05.2026):**
+
+- VC `settings[current_period]` = `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)`.
+- Bot `bot_close_period` reads `ANY(settings[current_period])` to decide which period to close.
+- Frontend dashboard, Data Explorer, app sync — all showed `current_period = 202605`.
+- Bot consistently saw `current_period = 202603` inside its transaction. Created charges for the wrong period (202604 instead of 202606).
+- Same bot snapshot Output showed `current_period: 202605` AND `dash_пред_период: 202602` (= current - 1, computed when current was 202603). **Two VCs frozen at different moments inside the same transaction.**
+- Trigger: heavy modification of another table (`student_tariffs` wiped+recreated by another bot) the day before. Snapshot got "stuck" on the pre-modification state.
+
+**Confirmed by Gemini:** classical AppSheet bot snapshot caching. VC, SELECT across tables, ANY of another table — all hit the cached snapshot. Even directly inlining the formula (replacing `ANY(settings[current_period])` with the underlying `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)`) **does not help** — `SELECT(charges[...])` reads the same frozen snapshot.
+
+**The canonical fix:**
+
+1. Convert the VC to a **physical column** (add a header to the Google Sheet, Regenerate Schema in AppSheet, drop the old VC). Set correct Type and Show? — `Regenerate Schema` will guess wrong (often `Duration`).
+2. Find the action that fires the bot (e.g., the trigger action that writes `NOW()` to the trigger column).
+3. Extend that action's **Set columns** to also write the formula into the physical column.
+4. Result: the row that triggers the bot's Data Change Event already contains the fresh value when the bot starts — the bot reads it from the event row, no snapshot involved.
+
+**Project example:**
+
+- Trigger action `settings__update_trigger` (writes `last_close_trigger = NOW()`) extended:
+  - `last_close_trigger` = `NOW()`
+  - `current_period` = `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)`
+- VC `current_period` deleted. Physical column with same name added in Sheets.
+- All 18+ formulas referencing `settings[current_period]` (`ANY(...)`, dashboard tiles, Valid_if on `charges[period]`, action formulas) automatically rebound to the physical column on Save. No formula edits needed.
+
+**When this matters:**
+
+- ANY bot that needs to read a derived value from another table at runtime.
+- Any `SELECT(other_table[col], ...)` inside a bot step formula — same caching issue.
+- Especially after another bot has just modified large numbers of rows (the snapshot is more likely to be stale).
+
+**When this does NOT matter:**
+
+- Frontend rendering (VCs recompute on sync).
+- Bots that only read columns from the triggering row itself (no `SELECT` across tables).
+- Bots triggered by user action where you control the moment of activation.
+
+**Cosmetic side-effect to watch for:** if the physical column is updated **before** the bot's main work (so the work uses fresh value) but the bot also writes a status message **after** doing work that changes the underlying data, the message formula may read the post-work value of the physical column (because the snapshot now contains the new rows the bot just created). In the project, `bot_close_period` writes "Period X closed" using `ANY(settings[current_period])` after the ForEach — X comes out as the **new** max (= closed + 1), not the closed period. Workaround options: compute "closed period" as `current - 1` in the message formula via the YYYYMM-arithmetic IFS pattern; or store the value to a separate physical column before the ForEach.
+
+**Source:** SubGeneral #15, 13.05.2026. Full diagnostic chain in `reports/2026-05-13_soklever-appsheet-report-15.md`. Gemini consultation confirmed the snapshot model.
+
+---
+
 ## Section R — Slices and System-Generated Views
 
 ### R.1 Each Slice has its own auto-generated Detail/Form/Inline views
@@ -1095,6 +1143,12 @@ This means the mobile renderer treats Detail-via-filter-slice differently from D
 | Detect column changed in Bot event | `[_THISROW_BEFORE].[col] <> [_THISROW_AFTER].[col]` — Bot Event Condition only |
 | Next period from ref_periods | `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(ANY(settings[current_period])))), 1)` |
 | Dynamic confirmation message | `CONCATENATE("Text ", ANY(settings[col]), " more text")` — use instead of `<<col>>` syntax |
+| Regex pattern match | **NOT SUPPORTED in AppSheet.** No `MATCHES`, `ISMATCH`, `REGEXMATCH` — all are Google Sheets/Apps Script functions, not AppSheet. Verified 12.05.2026 (birth_date text format attempt) + Gemini confirm. |
+| Validate date-formatted text (e.g. ДД.ММ.ГГГГ) | Canonical AppSheet way: `OR(ISBLANK([col]), AND(LEN([col])=10, ISNOTBLANK(DATE(SUBSTITUTE([col], ".", "/")))))`. Depends on app **Locale** (Settings → Information → Regional must be ru/ua for DMY parsing). |
+| Date-Text round-trip | `DATE(SUBSTITUTE([text_col], ".", "/"))` — converts validated ДД.ММ.ГГГГ text back to Date type (VC or initial value). |
+| Mobile-friendly date input (no calendar picker) | Native Date type forces calendar picker (terrible for birthdates 10+ years back). Three workarounds: (1) keep Type=Text + validation above + Description hint; (2) three Enum columns Day/Month/Year, assemble via `DATE(CONCATENATE([Month],"/",[Day],"/",[Year]))`; (3) Display→Input mode — `Buttons`/`Stack` rarely affects Date picker, AppSheet uses native OS components. |
+| Bot-written timestamp column — no Initial value | Columns written exclusively by Bot steps (Set row values with NOW()) should have **empty Initial value**. AppSheet auto-fills Initial value = NOW() on DateTime columns after Regenerate Schema — manually clear it. Otherwise: if a new row is ever inserted via form/manual, it logs row-creation time, not last-event time → semantic collision with bot writes. Verified 12.05.2026 on `settings[last_event_at]` (#08). |
+| Auto-assigned actions on dashboard slices | When adding a new Prominent action on a base table (e.g. `settings`), AppSheet **auto-assigns** it to ALL detail views built on slices of that table. On a dashboard composed of slice-based detail tiles (e.g. `settings_dash_открытый`, `settings_dash_долги`, …) the button appears on every tile. Fix: in each slice's **Slice Actions**, remove the action from Auto assign (set to explicit list or empty). Discovered 12.05.2026 (#08 §4.4 / §4.5). |
 
 ---
 
