@@ -1014,13 +1014,16 @@ The header continues to render correctly because Header column has its own pipel
 3. Extend that action's **Set columns** to also write the formula into the physical column.
 4. Result: the row that triggers the bot's Data Change Event already contains the fresh value when the bot starts — the bot reads it from the event row, no snapshot involved.
 
-**Project example:**
+**Project example (updated 13.05.2026 #16, "variant C+"):**
 
-- Trigger action `settings__update_trigger` (writes `last_close_trigger = NOW()`) extended:
+- Trigger action `settings__update_trigger` writes **target state**, not current state:
   - `last_close_trigger` = `NOW()`
-  - `current_period` = `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)`
+  - `current_period` = `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)))), 1)` — i.e., **next period after current max**, not the max itself.
+- ForEach step (`student_tariffs__create_next_charge`) reads `ANY(settings[current_period])` directly as the period for new charges — no further "+1" computation.
+- Notification step builds "closed period" from `ref_periods` (`max < current`), and "opened period" from `ANY(settings[current_period])`. **Never reads `charges[period]` in the notification step** — see next paragraph.
 - VC `current_period` deleted. Physical column with same name added in Sheets.
-- All 18+ formulas referencing `settings[current_period]` (`ANY(...)`, dashboard tiles, Valid_if on `charges[period]`, action formulas) automatically rebound to the physical column on Save. No formula edits needed.
+
+**Semantic shift:** before #16, `current_period` meant "the latest period for which charges exist" (= `max(charges[period])`). After #16, it means "the open period — the one charges are being created into right now". In steady state these are the same value; the difference is when. The action writes `current = max + 1` BEFORE the ForEach, then the ForEach creates charges for that period — after commit, `current` equals the new `max`. Synchronous.
 
 **When this matters:**
 
@@ -1034,9 +1037,20 @@ The header continues to render correctly because Header column has its own pipel
 - Bots that only read columns from the triggering row itself (no `SELECT` across tables).
 - Bots triggered by user action where you control the moment of activation.
 
-**Cosmetic side-effect to watch for:** if the physical column is updated **before** the bot's main work (so the work uses fresh value) but the bot also writes a status message **after** doing work that changes the underlying data, the message formula may read the post-work value of the physical column (because the snapshot now contains the new rows the bot just created). In the project, `bot_close_period` writes "Period X closed" using `ANY(settings[current_period])` after the ForEach — X comes out as the **new** max (= closed + 1), not the closed period. Workaround options: compute "closed period" as `current - 1` in the message formula via the YYYYMM-arithmetic IFS pattern; or store the value to a separate physical column before the ForEach.
+**Critical extension (#16, 13.05.2026): snapshot reads the target table even in FINAL steps after ForEach.**
 
-**Source:** SubGeneral #15, 13.05.2026. Full diagnostic chain in `reports/2026-05-13_soklever-appsheet-report-15.md`. Gemini consultation confirmed the snapshot model.
+Naive assumption: "ForEach commits its writes mid-bot, so subsequent steps see the new rows." **Wrong.** The notification step that runs AFTER ForEach still reads `SELECT(charges[period])` from a snapshot — and observed behavior is that this snapshot **does** include the newly created rows (or some of them), but inconsistently. In #16, `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)` in the notification formula returned 202606 (the newly created max) instead of 202605 (the actual closed period). Two attempts to fix it failed before the team converged on the right rule:
+
+**Rule:** Inside `step_no_set_result` (or any final notification/result step of a bot), **NEVER read the target table via SELECT/INDEX to compute a "before" value**. Use these sources of truth instead:
+- For the "opened period" (new state): `ANY(settings[current_period])` — guaranteed fresh, written by Step 1 of the same bot.
+- For the "closed period" (previous state): compute via `ref_periods` arithmetic — `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) < NUMBER(ANY(settings[current_period]))), TRUE), 1)`. The `ref_periods` table is not modified by the bot, so its snapshot is reliable.
+- For "rows created" count: count something the bot iterated over (e.g., active `student_tariffs`), NOT `SELECT(charges[...], [period] = X)`.
+
+**Variant C+ ("preventive update") — the canonical pattern, from Gemini consultation:**
+
+Instead of "compute current state inside the bot, then act on it", flip the order: **write the target state first, then act on that pre-written value.** The action that triggers the bot writes the desired post-condition into a physical column; subsequent bot steps use that value as the source of truth and never need to re-query the changing table.
+
+**Source:** SubGeneral #15 (initial fix, 13.05.2026), #16 (final fix, 13.05.2026). Full diagnostic chain in `reports/2026-05-13_soklever-appsheet-report-15.md` + report-16 (TBD). Gemini consultation confirmed the snapshot model and recommended variant C+.
 
 ---
 

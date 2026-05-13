@@ -389,29 +389,31 @@ CONCATENATE([first_name], " ", [last_name], " (", [class_group], ")")
 
 **Хранение:** столбец N в листе `settings` Google Sheets.
 
-**Обновление:** action `settings__update_trigger` пишет:
-```
-INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)
-```
-одновременно с `last_close_trigger = NOW()`. То есть в момент клика «Закрыть период» физическая колонка обновляется свежим max(charges[period]), затем срабатывает Bot.
+**Семантика (с 13.05.2026 #16, вариант C+):** «открытый период» — тот, в который сейчас идут регулярные начисления. То есть в нормальном ходе совпадает с `max(charges[period])`.
 
-**Семантика:** «месяц, за который последний раз были созданы регулярные начисления». В нормальном ходе — последний открытый период.
+**Обновление:** action `settings__update_trigger` пишет **«следующий период от max(charges)»**:
+```
+INDEX(SORT(SELECT(ref_periods[period],
+  NUMBER([period]) > NUMBER(INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1))
+)), 1)
+```
+одновременно с `last_close_trigger = NOW()`. В момент клика «Закрыть период» физическая колонка обновляется значением «следующий период по справочнику от текущего max(charges[period])», и **только потом** ForEach создаёт charges за этот период.
+
+**Почему так — «вариант C+» от Gemini.** До 13.05.2026 в `settings__update_trigger` стоял прямой max charges (`INDEX(SORT(charges[period], TRUE), 1)`). Это давало правильное значение **до** запуска бота. Но `student_tariffs__create_next_charge` внутри ForEach считал «period + 1» через справочник от `settings[current_period]`. Получалось: settings писал старое max (202605), ForEach создавал новые charges (202606), `current_period` оставался 202605. После коммита транзакции — рассинхрон между `settings` (202605) и реальностью в charges (202606).
+
+Решение: **сначала записать целевое состояние** в settings (открытый период = next от max), потом ForEach создаёт charges за это значение напрямую (`ANY(settings[current_period])`). После коммита `settings[current_period]` совпадает с max(charges[period]) — согласованность.
 
 **Почему физическая, а не VC** (фундаментальный паттерн AppSheet):
 
-До 13.05.2026 это была VC с той же формулой (без фильтра `tariff_type` — снят 11.05.2026 в pre-#08.4). Обнаружено в #15 (после `bot_summer_apply` 12.05): **внутри AppSheet bot transaction VC читаются из замороженного snapshot всех таблиц**, который не пересчитывается заново. Если VC зависит от другой таблицы (`current_period` зависит от `charges`), snapshot может быть устаревшим — бот видит значение, актуальное на момент **предыдущей** активности, а не текущий.
+До 13.05.2026 это была VC. Обнаружено в #15: **внутри AppSheet bot transaction VC читаются из замороженного snapshot всех таблиц**, не пересчитываются. Если VC зависит от другой таблицы (`current_period` зависит от `charges`), snapshot может быть устаревшим — бот видит значение, актуальное на момент **предыдущей** активности.
 
-Симптом: `bot_close_period` создавал charges за 202604, при том что VC `current_period` на frontend и Data Explorer показывала 202605. Подтверждено в Monitor: в Output Input-шага одна VC settings (`current_period`) показывала 202605, другая VC (`dash_пред_период` = current - 1) — 202602. Несогласованность внутри одной транзакции = разные моменты «заморозки».
+Симптом #15: `bot_close_period` создавал charges за 202604, при том что VC `current_period` на frontend и Data Explorer показывала 202605. Подтверждено в Monitor: в Output Input-шага одна VC `current_period` показывала 202605, другая VC `dash_пред_период` (= current - 1) показывала 202602. Несогласованность внутри одной транзакции = разные моменты «заморозки».
 
-Подтверждено внешним консультантом Gemini: классическая особенность AppSheet bot snapshot, рекомендация — перевод в физическую колонку.
-
-**Решение** — физическая. Физическая колонка читается ботом из строки settings, которая участвует в Data Change Event — она актуальна на момент клика. Action `settings__update_trigger` обновляет её **до** срабатывания event, поэтому бот гарантированно видит свежее значение.
-
-**Зависимые формулы** (дашборд, Valid_if на `charges[period]`/`expenses[period]`, формула в `student_tariffs__create_next_charge`, сообщение в `step_no_set_result` через `ANY(settings[current_period])`) — переключились автоматически после Regenerate Schema. Семантика не сломалась: для них имя `settings[current_period]` теперь указывает на физическую колонку вместо VC, но возвращаемое значение то же.
+Подтверждено внешним консультантом Gemini: классическая особенность AppSheet bot snapshot, рекомендация — перевод в физическую колонку + логика «обновить до работы».
 
 **`bot_summer_apply` `current_period` НЕ обновляет** — он не меняет periods в charges. Если в будущем летний перевод начнёт создавать charges (например, июньские сразу при переключении) — нужно будет добавить обновление и в `settings__set_summer_trigger`.
 
-**Косметический хвост:** в `step_no_set_result` сообщение бота строится через `ANY(settings[current_period])` **после** ForEach. После ForEach новые charges уже созданы, `settings__update_trigger` уже выполнил Set Values (он отрабатывает один раз в самом начале) — но **внутри** транзакции сам Bot перечитывает `settings[current_period]` уже из обновлённого snapshot после ForEach (видит max после создания новых charges). Поэтому сообщение пишет «Период X закрыт», где X на единицу больше реально закрытого. Не блокер для логики, но текст для пользователя некорректный. Поправить до боевого закрытия мая.
+**Ограничение варианта C+:** ручное удаление строк в Sheets `charges` **не пересчитывает** `settings[current_period]` автоматически — никакой action не реагирует. `current_period` синхронизируется только при следующем запуске `bot_close_period`. Это осознанное решение (§7.1 SYSTEM.md): прямая правка Sheets — аварийный канал, не штатный поток. При необходимости владелец синхронизирует вручную.
 
 ### §3.7. opening_balances в формулах долга
 
@@ -457,10 +459,25 @@ ANY(settings[current_period])
 CONCATENATE("Начисления за текущий период (", ANY(settings[current_period]), ") уже существуют!")
 ```
 
-В **NO-ветке** (`step_no_set_result`) — финальный текст после мини-патча #11:
-«Период {dash_пред_период} закрыт. Открытый период: {current_period}. Создано начислений: N.»
+В **NO-ветке** (`step_no_set_result`) — формула после фикса #16 (13.05.2026):
+```
+CONCATENATE(
+  "Период ",
+  INDEX(SORT(SELECT(ref_periods[period],
+    NUMBER([period]) < NUMBER(ANY(settings[current_period]))
+  ), TRUE), 1),
+  " закрыт. Открытый период: ",
+  ANY(settings[current_period]),
+  ". Создано начислений: ",
+  COUNT(SELECT(student_tariffs[assignment_id], [student_id].[status] = "Активен")),
+  "."
+)
+```
 
-Реализация через CONCATENATE с подстановкой `dash_пред_период`, `current_period`, COUNT.
+**Почему так:**
+- «Закрытый» = max период из `ref_periods` строго меньше текущего открытого. Не читаем `charges` — snapshot уже содержит свежесозданные строки за новый период, дал бы +1 (косметический баг v15, см. §8.4 SYSTEM.md).
+- «Открытый» = `ANY(settings[current_period])`. Шаг 1 уже записал сюда новое значение (next от max), оно гарантированно актуально на этом шаге.
+- «Создано» = количество активных student_tariffs. Считать через `SELECT(charges[charge_id], [period] = current_period)` нельзя по той же причине — snapshot в финальных шагах целевую таблицу видит частично.
 
 ### §3.12. Action chain «Выбытие ученика» (NEW в pre-#08.1)
 
@@ -542,7 +559,7 @@ CONCATENATE("Начисления за текущий период (", ANY(setti
 - Do this: `Data: set the values of some columns in this row`
 - Set columns:
   - `last_close_trigger` = `NOW()`
-  - `current_period` = `INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)` (с 13.05.2026, см. §3.6 — фикс рассинхрона)
+  - `current_period` = `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(INDEX(SORT(SELECT(charges[period], TRUE), TRUE), 1)))), 1)` (с 13.05.2026 #16, вариант C+, см. §3.6)
 
 ### §4.4. Action `settings__close_period_trigger`
 
@@ -567,7 +584,7 @@ CONCATENATE("Начисления за текущий период (", ANY(setti
   - `student_id` = `[student_id]`
   - `tariff_id` = `[tariff_id]`
   - `charge_type` = `"Авто"`
-  - `period` = `INDEX(SORT(SELECT(ref_periods[period], NUMBER([period]) > NUMBER(ANY(settings[current_period])))), 1)`
+  - `period` = `ANY(settings[current_period])` (с 13.05.2026 #16, вариант C+, см. §3.6: открытый период уже записан Шагом 1)
   - `amount` = `[tariff_id].[amount]`
   - `description` = `""`
 - Show_If: `FALSE`.
@@ -875,6 +892,7 @@ LINKTOROW([_THISROW], "form_view_name")
 8. **Same-table reference action** разрешён.
 9. **KEY-колонку нельзя скрыть на writable-таблице.** Обход: read-only Slice.
 10. **VC внутри Bot transaction:** значения пересчитываются лениво. Если в шаге `Set row values` обращаться к VC, можно получить pre-commit состояние.
+14. **Snapshot целевой таблицы внутри Bot — даже на финальных шагах.** `SELECT(charges[period])` в `step_no_set_result` (после ForEach, создавшего строки) возвращает snapshot, частично или полностью НЕ учитывающий свежесозданные строки. Проявление: сообщение «Период X закрыт» с неправильным X (#16, 13.05.2026). Канон: для значений, которые нужно показать в финальных шагах бота, использовать **физическую колонку settings, обновлённую первым шагом** (вариант C+), а не пытаться вычислить через SELECT по target table. См. §3.6 и §3.11.
 11. **`LINKTOFORM` ≠ `LINKTOROW`.** LINKTOFORM открывает форму создания, LINKTOROW — редактирования существующей строки. См. BP-45.
 12. **VC рендерятся после физических колонок в Detail view** независимо от Column order. См. §6.9.
 13. **Action with Inputs** — относительно свежая фича AppSheet, может отсутствовать в старых версиях редактора. Fallback — Slice + Form view + LINKTOROW.
@@ -888,6 +906,7 @@ LINKTOROW([_THISROW], "form_view_name")
 - **0.1** (08.05.2026) — первый сбор. Источник: бэкапы v8, v8-fix, v9, v10, v11, v12.1 + arch-session-td1.
 - **0.2** (09.05.2026) — синхронизация с отчётами pre-#08 и pre-#08.1. Состав `students` обновлён (21 колонка, +`withdrawal_date`, +`birth_date`). Добавлены §3.12 «Action chain Выбытие», §3.13 «Прочие actions UX-уровня» (`families__add_student`, `students_Form`, унификация Detail view, очистка фильтров). Добавлены хвосты §6.8–§6.11 (`_ComputedName`, VC vs Column order, Action with Inputs недоступен, предупреждение в form). Добавлен §7.3 с BP-45..BP-47 (LINKTOROW, Grouped+cross-table, Form Saved). §8 расширена пунктами 11–13.
 - **0.3** (13.05.2026) — синхронизация с отчётом #15. §3.6 переписан под физическую колонку `current_period` (вместо VC). §4.3 расширен — action `settings__update_trigger` теперь пишет два значения (`last_close_trigger` + `current_period`). Зафиксирован принципиальный паттерн «VC в bot transaction = snapshot, не пересчитывается».
+- **0.4** (13.05.2026, #16) — фикс варианта C+: §3.6 переписан (семантика `current_period` сдвинута — теперь «открытый период», формула в `settings__update_trigger` пишет next от max, не сам max), §3.11 переписан (формула сообщения через `ref_periods` и `student_tariffs`, не через `charges`), §4.3 и §4.5 синхронизированы. §8 расширен пунктом 14 — snapshot целевой таблицы виден и в финальных шагах бота.
 
 ---
 
