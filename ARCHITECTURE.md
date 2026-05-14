@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — СО Клевер Биллинг
 
-**Версия:** 0.2 (09.05.2026)
+**Версия:** 0.5 (14.05.2026)
 **Назначение документа:** долгоживущая память о технической реализации. Реальные составы таблиц, дословные формулы, цепочки actions и bots, накопленные best practices, карта подводных камней AppSheet.
 
 **Что НЕ в этом документе:** бизнес-модель и принципы (`SYSTEM.md`), метафоры и термины (`GLOSSARY.md`), регламенты работы (`REGULATIONS.md`).
@@ -25,7 +25,7 @@
 
 ### §1.2. Приложение
 
-**AppSheet:** `soklever-root-billing v.1.0`. Версия на 09.05.2026 — **1.000483** (после применения pre-#08 и pre-#08.1).
+**AppSheet:** `soklever-root-billing v.1.0`. Версия на 14.05.2026 — **1.000586** (после pre-#09 + pre-#09.1 — взаимозачёты, фикс ключа `payments`, удаление рудиментов).
 
 ### §1.3. Логика
 
@@ -144,22 +144,42 @@
 | 9 | `created_at` | DateTime | Initial Value = `NOW()`. |
 | 10 | `_form_header_charges` | Show | |
 
-### §2.6. `payments`
+### §2.6. `payments` (9 колонок)
 
-Точный состав (TODO досверить дословно в следующей сессии):
-```
-payments: payment_id | student_id | amount | payment_date | comment | class_group (Spreadsheet formula)
-```
+Состав досверён дословно в pre-#09 (14.05.2026), рудименты `_ComputedKey` и `class_group` удалены в pre-#09.1 (14.05.2026):
+
+| # | Колонка | Тип | KEY | LABEL | Заметка |
+|---|---|---|---|---|---|
+| 1 | `_RowNumber` | Number | — | — | системная |
+| 2 | `payment_id` | Text | ✅ | — | KEY с 14.05.2026 (pre-#09). Initial value = `UNIQUEID()`. |
+| 3 | `student_id` | Ref → students | — | — | |
+| 4 | `payment_date` | Date | — | ✅ | редактируется, default `TODAY()` (Р-4) |
+| 5 | `amount` | Number | — | — | |
+| 6 | `payment_type` | Enum | — | — | значения: «Наличные», «Перевод», «Взаимозачёт» |
+| 7 | `comment` | Text | — | — | |
+| 8 | `created_at` | DateTime | — | — | |
+| 9 | `_form_header_payments` | Show (VC) | — | — | косметика формы |
 
 **Важно (Р-1):** у `payments` **нет** поля `period`. Платежи не привязаны к месяцу — это часть модели сосудов.
 
-`class_group` в `payments` — Text со Spreadsheet formula (VLOOKUP в Sheets из `students[class_group]`). Сознательная денормализация. AppSheet-формула не используется.
+**KEY-история (pre-#09, 14.05.2026).** До 14.05 ключом таблицы был VC `_ComputedKey` = `CONCATENATE([student_id], ": ", [payment_date])` — составной бизнес-ключ из ранней эпохи (до модели сосудов, когда платёж мыслился «один в месяц на ученика»). Следствие — два платежа одного ученика одной датой невозможны (`There is already a row with the key`). Обнаружено при тестировании pre-#09 (взаимозачёт = второй платёж в тот же день). Фикс: KEY переведён на `payment_id` (Initial value `UNIQUEID()` уже стоял), `_ComputedKey` разжалован из ключа. 12 существующих строк безопасны — у всех `payment_id` уникален.
 
-### §2.7. `expenses`
+**Удаление рудиментов (pre-#09.1, 14.05.2026).** После разжалования `_ComputedKey` исчезла автоматически при Regenerate Schema в pre-#09 (VC, потерявшая роль ключа). Колонка `class_group` (Text, Spreadsheet formula — VLOOKUP из `students[class_group]`, денормализация эпохи до AppSheet без потребителя) удалена явно: Delete column в Sheets → Regenerate Schema. После Regenerate — два ожидаемых Warning (slices `recent_payments`, `payments_filtered` пересобрали список колонок), ни одной Error. Контроль: карточка платежа, создание платежа, дашборд — без замечаний.
 
-```
-expenses: expense_id | amount | period→ref_periods | expense_date | category_id | description | created_by
-```
+### §2.7. `expenses` (8 колонок)
+
+Состав досверён в pre-#09 (14.05.2026) — исправлены имена двух колонок относительно прежней записи:
+
+| # | Колонка | Тип | Заметка |
+|---|---|---|---|
+| 1 | `expense_id` | Text (KEY) | |
+| 2 | `expense_date` | Date | дата факта |
+| 3 | `period` | Ref → ref_periods | период отнесения (Р-2) |
+| 4 | `category` | Ref → expense_categories | **имя `category`, не `category_id`** (исправлено 14.05.2026) |
+| 5 | `amount` | Number | |
+| 6 | `comment` | Text | **имя `comment`, не `description`** (исправлено 14.05.2026) |
+| 7 | `created_at` | DateTime | |
+| 8 | `created_by` | Text | |
 
 **Р-2:** для дашборда и аналитики используется `period`, не `expense_date`.
 
@@ -535,6 +555,42 @@ CONCATENATE(
 - `payments_filtered`, `expenses_filtered` Slices — Update mode: Read-Only (был Updates+Adds+Deletes).
 - `payments_filtered_Form` view — удалён (конфликт: form view на Read-Only slice).
 
+### §3.14. Взаимозачёт — автооткрытие парного expense (NEW в pre-#09)
+
+**Цель:** при `payment_type = "Взаимозачёт"` оператор не должен помнить про парный расход. Взаимозачёт — одновременно поступление и расход на ту же сумму. Реализация — автооткрытие формы `expense` сразу после сохранения платежа.
+
+**Action `payments__open_barter_expense`:**
+
+| Поле | Значение |
+|---|---|
+| For a record of this table | `payments` |
+| Do this | `App: go to another view within this app` |
+| Only if this condition is true | `[payment_type] = "Взаимозачёт"` |
+| Position | `Hide` |
+| Confirmation | OFF |
+
+**Target:**
+```
+LINKTOFORM(
+  "expenses_Form",
+  "amount", [amount],
+  "expense_date", [payment_date],
+  "period", INDEX(settings[current_period], 1),
+  "category", "cat_other",
+  "comment", CONCATENATE("Взаимозачёт: ", [student_id].[family_id].[family_name])
+)
+```
+
+**Привязка:** UX → Views → `payments_Form` → Behavior → **Form Saved** → `payments__open_barter_expense`.
+
+**Ключевые решения:**
+- `period` = `INDEX(settings[current_period], 1)` — **открытый период**, не период из `payment_date`. Парный расход относится к текущей живой зоне; период даты платежа дал бы расход в закрытую твёрдую землю и упёрся бы в Valid_if `expenses[period]` (окно current..current+3). `expense_date` = `[payment_date]` — это дата факта, она корректна.
+- `category` = `"cat_other"` — `category_id` категории «Прочее» (передаётся как строка, AppSheet привязывает к Ref по совпадению).
+- Имена колонок в LINKTOFORM — `category` и `comment` (фактический состав `expenses`, см. §2.7), не `category_id`/`description`.
+- `payment` и `expense` — два независимых документа, **связки через FK нет** (§2.3 SYSTEM «суровая правда без шума»; транзакционные парные операции дороги на Этапе 0 — см. бэкап-память проекта). Cancel формы expense → парный расход не создаётся, принятое ограничение.
+
+**Паттерн:** `LINKTOFORM` здесь правомерен — создаётся **новая** запись expense (ср. BP-45: для редактирования нужен `LINKTOROW`).
+
 ---
 
 ## §4. Closure architecture (закрытие периода)
@@ -822,6 +878,17 @@ CONCATENATE([first_name], " ", [last_name], " (", [class_group], ")")
 
 **Решение:** оставить как есть. Принципиально не лечится без ухудшения UX.
 
+### §6.12. ✅ Рудименты в `payments` — удалены (pre-#09.1, 14.05.2026)
+
+Две колонки `payments` удалены микро-патчем pre-#09.1 (исполнял владелец, без Sonnet'а):
+
+1. **`_ComputedKey`** — бывший составной ключ таблицы (`CONCATENATE([student_id], ": ", [payment_date])`). Разжалован из KEY в pre-#09 (§9, фикс блокера H-01). Исчезла **автоматически** при Regenerate Schema ещё в pre-#09 — VC, потерявшая роль ключа. Отдельно удалять не пришлось.
+2. **`class_group`** — Text со Spreadsheet formula (VLOOKUP из `students[class_group]`), денормализация эпохи до AppSheet без потребителя. Удалена явно: Delete column в Sheets → Regenerate Schema. После Regenerate — два ожидаемых Warning (slices `recent_payments`, `payments_filtered`), ни одной Error. Контроль (карточка платежа, создание платежа, дашборд) — без замечаний.
+
+Итог: `payments` — 9 колонок (§2.6).
+
+**Нумерация хвостов pre-#09:** в чате стратега фигурировали H-01 (ключ `payments`) и H-02 (период expense), оба закрыты в брифе §9/§10. Отчёт Sonnet'а пронумеровал хвост `_ComputedKey` как H-04 — вероятно опечатка (H-03 в проекте нет). По фактическому порядку это был H-03; закрыт в pre-#09.1.
+
 ---
 
 ## §7. Best Practices (BP)
@@ -907,6 +974,7 @@ LINKTOROW([_THISROW], "form_view_name")
 - **0.2** (09.05.2026) — синхронизация с отчётами pre-#08 и pre-#08.1. Состав `students` обновлён (21 колонка, +`withdrawal_date`, +`birth_date`). Добавлены §3.12 «Action chain Выбытие», §3.13 «Прочие actions UX-уровня» (`families__add_student`, `students_Form`, унификация Detail view, очистка фильтров). Добавлены хвосты §6.8–§6.11 (`_ComputedName`, VC vs Column order, Action with Inputs недоступен, предупреждение в form). Добавлен §7.3 с BP-45..BP-47 (LINKTOROW, Grouped+cross-table, Form Saved). §8 расширена пунктами 11–13.
 - **0.3** (13.05.2026) — синхронизация с отчётом #15. §3.6 переписан под физическую колонку `current_period` (вместо VC). §4.3 расширен — action `settings__update_trigger` теперь пишет два значения (`last_close_trigger` + `current_period`). Зафиксирован принципиальный паттерн «VC в bot transaction = snapshot, не пересчитывается».
 - **0.4** (13.05.2026, #16) — фикс варианта C+: §3.6 переписан (семантика `current_period` сдвинута — теперь «открытый период», формула в `settings__update_trigger` пишет next от max, не сам max), §3.11 переписан (формула сообщения через `ref_periods` и `student_tariffs`, не через `charges`), §4.3 и §4.5 синхронизированы. §8 расширен пунктом 14 — snapshot целевой таблицы виден и в финальных шагах бота.
+- **0.5** (14.05.2026) — синхронизация с отчётом pre-#09 и микро-патчем pre-#09.1. §1.2: версия 1.000483 → 1.000584. §2.6 `payments` переписан — досверён дословный состав; зафиксирована KEY-история (составной `_ComputedKey` → `payment_id`, фикс блокера H-01); рудименты `_ComputedKey` и `class_group` удалены (pre-#09.1) → состав 9 колонок. §2.7 `expenses` переписан — досверён состав, исправлены имена колонок: `category` (не `category_id`), `comment` (не `description`). Добавлен §3.14 — action `payments__open_barter_expense` (взаимозачёт, автооткрытие парного expense через Form Saved). §6.12 — рудименты `payments` помечены удалёнными (pre-#09.1), нумерация хвостов pre-#09.
 
 ---
 

@@ -1050,7 +1050,7 @@ Naive assumption: "ForEach commits its writes mid-bot, so subsequent steps see t
 
 Instead of "compute current state inside the bot, then act on it", flip the order: **write the target state first, then act on that pre-written value.** The action that triggers the bot writes the desired post-condition into a physical column; subsequent bot steps use that value as the source of truth and never need to re-query the changing table.
 
-**Source:** SubGeneral #15 (initial fix, 13.05.2026), #16 (final fix, 13.05.2026). Full diagnostic chain in `reports/2026-05-13_soklever-appsheet-report-15.md` + report-16 (TBD). Gemini consultation confirmed the snapshot model and recommended variant C+.
+**Source:** SubGeneral #15 (initial fix, 13.05.2026), #16 (final fix, 13.05.2026). Full diagnostic chain in `reports/2026-05-13_soklever-appsheet-report-pre09_0.md` (renamed 14.05.2026 from `report-15`) + report-16 (TBD). Gemini consultation confirmed the snapshot model and recommended variant C+.
 
 ---
 
