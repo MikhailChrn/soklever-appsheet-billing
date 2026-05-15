@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk 'NR>=341 && NR<=1050' /tmp/appdoc.txt)",
+      "Bash(awk '/^ Table name$/{flag=1; n=NR} flag && /Are updates allowed/{print n\": \"$0; flag=0}' /tmp/appdoc.txt)",
+      "Bash(awk 'NR>=970 && NR<=1050' /tmp/appdoc.txt)",
+      "Bash(awk 'NR>=21361 && NR<=22000' /tmp/appdoc.txt)",
+      "Bash(grep -n \"^ Actions$\\\\|^Actions$\" /tmp/appdoc.txt)",
+      "Bash(awk 'NR>=24016' /tmp/appdoc.txt)",
+      "Bash(grep -n \"^ Bots$\\\\|^Bots$\\\\|Bot name\" /tmp/appdoc.txt)"
+    ]
+  }
+}
